@@ -10,7 +10,7 @@ mod matching;
 mod networking;
 mod proofs;
 
-use config::{Config, Settings};
+use config::{Config, KeyManager, EthereumConfig, MatchingConfig, NetworkingConfig, ProofConfig};
 use ethereum::EthereumClient;
 use matching::MatchingEngine;
 use networking::P2PNetwork;
