@@ -128,8 +128,6 @@ async fn start_operator(config_path: PathBuf) -> Result<()> {
 }
 
 async fn generate_keys(output_path: PathBuf) -> Result<()> {
-    use config::KeyManager;
-    
     tokio::fs::create_dir_all(&output_path).await?;
     
     let key_manager = KeyManager::new();
