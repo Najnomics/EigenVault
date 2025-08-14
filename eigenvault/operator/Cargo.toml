@@ -11,30 +11,32 @@ license = "MIT"
 tokio = { version = "1.0", features = ["full"] }
 tokio-util = "0.7"
 
-# Web3 and Ethereum
-ethers = { version = "2.0", features = ["rustls", "ws"] }
-ethers-core = "2.0"
-ethers-providers = "2.0"
-ethers-signers = "2.0"
-ethers-contract = "2.0"
+# Web3 and Ethereum (simplified for development)
+# ethers = { version = "2.0", features = ["rustls", "ws"] }
+# ethers-core = "2.0"
+# ethers-providers = "2.0"
+# ethers-signers = "2.0"
+# ethers-contract = "2.0"
 
 # Cryptography
 secp256k1 = { version = "0.28", features = ["recovery", "rand"] }
 sha3 = "0.10"
+sha2 = "0.10"
 rand = "0.8"
 hex = "0.4"
 aes-gcm = "0.10"
 chacha20poly1305 = "0.10"
+rsa = "0.9"
 
-# Zero-knowledge proofs
-arkworks-rs = "0.4"
-ark-bn254 = "0.4"
-ark-groth16 = "0.4"
-ark-serialize = "0.4"
-ark-std = "0.4"
+# Zero-knowledge proofs (simplified for development)
+# arkworks-rs = "0.4"
+# ark-bn254 = "0.4"
+# ark-groth16 = "0.4"
+# ark-serialize = "0.4"
+# ark-std = "0.4"
 
 # Networking
-libp2p = { version = "0.53", features = ["gossipsub", "mdns", "noise", "tcp", "yamux", "identify", "kad"] }
+# libp2p = { version = "0.53", features = ["gossipsub", "mdns", "noise", "tcp", "yamux", "identify", "kad"] }
 futures = "0.3"
 
 # Serialization
@@ -43,8 +45,8 @@ serde_json = "1.0"
 bincode = "1.3"
 toml = "0.8"
 
-# Database
-sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "chrono", "uuid"] }
+# Database (simplified for development)
+# sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "chrono", "uuid"] }
 
 # Utilities
 uuid = { version = "1.0", features = ["v4", "serde"] }
@@ -54,7 +56,7 @@ thiserror = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4.0", features = ["derive"] }
-config = "0.13"
+# config = "0.13"
 
 # Performance
 rayon = "1.7"
