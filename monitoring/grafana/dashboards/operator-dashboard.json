@@ -1,0 +1,142 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "EigenVault Operator Dashboard",
+    "tags": ["eigenvault", "operator"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "title": "System Overview",
+        "type": "row",
+        "collapsed": false
+      },
+      {
+        "title": "Orders Processed per Second",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "eigenvault:orders_processed_rate",
+            "legendFormat": "Orders/sec"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Orders per second"
+          }
+        ]
+      },
+      {
+        "title": "Matching Success Rate",
+        "type": "singlestat",
+        "targets": [
+          {
+            "expr": "eigenvault:matching_success_rate * 100",
+            "legendFormat": "Success %"
+          }
+        ],
+        "valueMaps": [
+          {
+            "value": "null",
+            "text": "N/A"
+          }
+        ],
+        "thresholds": "80,95",
+        "colors": ["#d44a3a", "#e24d42", "#299c46"]
+      },
+      {
+        "title": "Active Peers",
+        "type": "singlestat",
+        "targets": [
+          {
+            "expr": "eigenvault_p2p_active_peers",
+            "legendFormat": "Peers"
+          }
+        ]
+      },
+      {
+        "title": "Proof Generation Time",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "eigenvault:proof_generation_time_avg",
+            "legendFormat": "Avg time (s)"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Seconds"
+          }
+        ]
+      },
+      {
+        "title": "Network Activity",
+        "type": "row",
+        "collapsed": false
+      },
+      {
+        "title": "Ethereum Events",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "eigenvault:ethereum_events_rate",
+            "legendFormat": "Events/sec"
+          }
+        ]
+      },
+      {
+        "title": "P2P Messages",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "eigenvault:p2p_messages_rate",
+            "legendFormat": "Messages/sec"
+          }
+        ]
+      },
+      {
+        "title": "System Resources",
+        "type": "row",
+        "collapsed": false
+      },
+      {
+        "title": "CPU Usage",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "100 - (avg by (instance) (irate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)",
+            "legendFormat": "CPU %"
+          }
+        ]
+      },
+      {
+        "title": "Memory Usage",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100",
+            "legendFormat": "Memory %"
+          }
+        ]
+      },
+      {
+        "title": "Disk I/O",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(node_disk_read_bytes_total[5m])",
+            "legendFormat": "Read"
+          },
+          {
+            "expr": "rate(node_disk_written_bytes_total[5m])",
+            "legendFormat": "Write"
+          }
+        ]
+      }
+    ],
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "refresh": "10s"
+  }
+}
