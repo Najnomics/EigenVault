@@ -1,0 +1,531 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.26;
+
+import {ServiceManagerBase} from "@eigenlayer-middleware/src/ServiceManagerBase.sol";
+import {BLSApkRegistry} from "@eigenlayer-middleware/src/BLSApkRegistry.sol";
+import {RegistryCoordinator} from "@eigenlayer-middleware/src/RegistryCoordinator.sol";
+import {StakeRegistry} from "@eigenlayer-middleware/src/StakeRegistry.sol";
+import {IndexRegistry} from "@eigenlayer-middleware/src/IndexRegistry.sol";
+import {IServiceManager} from "@eigenlayer-middleware/src/interfaces/IServiceManager.sol";
+import {IAVSDirectory} from "@eigenlayer/contracts/interfaces/IAVSDirectory.sol";
+import {IRewardsCoordinator} from "@eigenlayer/contracts/interfaces/IRewardsCoordinator.sol";
+import {ISlasher} from "@eigenlayer/contracts/interfaces/ISlasher.sol";
+import {IDelegationManager} from "@eigenlayer/contracts/interfaces/IDelegationManager.sol";
+
+import {IEigenVaultHook} from "./interfaces/IEigenVaultHook.sol";
+import {OrderLib} from "./libraries/OrderLib.sol";
+import {ZKProofLib} from "./libraries/ZKProofLib.sol";
+
+/// @title EigenVaultServiceManager
+/// @notice Service Manager for EigenVault AVS that coordinates private order matching
+contract EigenVaultServiceManager is ServiceManagerBase {
+    using OrderLib for OrderLib.Order;
+    using ZKProofLib for bytes;
+
+    /// @notice Task states
+    enum TaskStatus {
+        Pending,
+        Completed,
+        Challenged,
+        Slashed
+    }
+
+    /// @notice Matching task structure
+    struct MatchingTask {
+        bytes32 taskId;
+        bytes32 ordersSetHash;
+        uint256 deadline;
+        bytes32 quorumBitmask;
+        uint256 minimumStake;
+        TaskStatus status;
+        bytes32 resultHash;
+        uint256 createdAt;
+        uint256 completedAt;
+        address[] assignedOperators;
+    }
+
+    /// @notice Task response structure
+    struct TaskResponse {
+        bytes32 taskId;
+        bytes32 resultHash;
+        bytes zkProof;
+        bytes operatorSignatures;
+        uint256 timestamp;
+        address[] respondingOperators;
+    }
+
+    /// @notice Operator performance metrics
+    struct OperatorMetrics {
+        uint256 tasksCompleted;
+        uint256 tasksSlashed;
+        uint256 totalRewards;
+        uint256 lastActiveTime;
+        uint256 averageResponseTime;
+        bool isActive;
+    }
+
+    /// @notice Hook contract reference
+    IEigenVaultHook public immutable eigenVaultHook;
+    
+    /// @notice Task counter
+    uint256 public taskCounter;
+    
+    /// @notice Minimum stake required for operators (32 ETH equivalent)
+    uint256 public constant MINIMUM_STAKE = 32 ether;
+    
+    /// @notice Task response window (10 minutes)
+    uint256 public constant RESPONSE_WINDOW = 10 minutes;
+    
+    /// @notice Challenge window (24 hours)
+    uint256 public constant CHALLENGE_WINDOW = 24 hours;
+    
+    /// @notice Base reward per task (0.01 ETH)
+    uint256 public constant BASE_TASK_REWARD = 0.01 ether;
+
+    /// @notice Mapping of task IDs to tasks
+    mapping(bytes32 => MatchingTask) public tasks;
+    
+    /// @notice Mapping of task IDs to responses
+    mapping(bytes32 => TaskResponse) public taskResponses;
+    
+    /// @notice Mapping of operators to their metrics
+    mapping(address => OperatorMetrics) public operatorMetrics;
+    
+    /// @notice Mapping of task results to prevent replay
+    mapping(bytes32 => bool) public usedResults;
+    
+    /// @notice Active operators list
+    address[] public activeOperators;
+    
+    /// @notice Owner of the contract
+    address public owner;
+
+    /// @notice Events
+    event TaskCreated(
+        bytes32 indexed taskId,
+        bytes32 indexed ordersSetHash,
+        uint256 deadline,
+        address[] assignedOperators
+    );
+    
+    event TaskCompleted(
+        bytes32 indexed taskId,
+        bytes32 resultHash,
+        address[] respondingOperators,
+        uint256 completedAt
+    );
+    
+    event TaskChallenged(
+        bytes32 indexed taskId,
+        address indexed challenger,
+        string reason
+    );
+    
+    event OperatorSlashed(
+        address indexed operator,
+        bytes32 indexed taskId,
+        uint256 slashAmount,
+        string reason
+    );
+    
+    event RewardsDistributed(
+        bytes32 indexed taskId,
+        address[] operators,
+        uint256[] rewards
+    );
+
+    /// @notice Modifiers
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Not owner");
+        _;
+    }
+
+    modifier onlyRegisteredOperator() {
+        require(
+            registryCoordinator.getOperatorStatus(msg.sender) == 
+            IRegistryCoordinator.OperatorStatus.REGISTERED,
+            "Operator not registered"
+        );
+        _;
+    }
+
+    /// @notice Constructor
+    /// @param _avsDirectory The AVS directory contract
+    /// @param _rewardsCoordinator The rewards coordinator contract  
+    /// @param _registryCoordinator The registry coordinator contract
+    /// @param _stakeRegistry The stake registry contract
+    /// @param _eigenVaultHook The EigenVault hook contract
+    constructor(
+        IAVSDirectory _avsDirectory,
+        IRewardsCoordinator _rewardsCoordinator,
+        RegistryCoordinator _registryCoordinator,
+        StakeRegistry _stakeRegistry,
+        IEigenVaultHook _eigenVaultHook
+    ) ServiceManagerBase(
+        _avsDirectory,
+        _rewardsCoordinator, 
+        _registryCoordinator,
+        _stakeRegistry
+    ) {
+        eigenVaultHook = _eigenVaultHook;
+        owner = msg.sender;
+    }
+
+    /// @notice Create a new matching task
+    /// @param ordersSetHash Hash of the orders to be matched
+    /// @param deadline Task completion deadline
+    /// @param quorumBitmask Required quorum configuration
+    /// @return taskId The created task ID
+    function createMatchingTask(
+        bytes32 ordersSetHash,
+        uint256 deadline,
+        bytes32 quorumBitmask
+    ) external returns (bytes32 taskId) {
+        require(deadline > block.timestamp + RESPONSE_WINDOW, "Invalid deadline");
+        
+        taskId = keccak256(abi.encodePacked(
+            "MATCHING_TASK",
+            ++taskCounter,
+            ordersSetHash,
+            block.timestamp
+        ));
+        
+        // Select operators for this task
+        address[] memory assignedOperators = _selectOperators(quorumBitmask);
+        require(assignedOperators.length > 0, "No operators available");
+        
+        // Create task
+        tasks[taskId] = MatchingTask({
+            taskId: taskId,
+            ordersSetHash: ordersSetHash,
+            deadline: deadline,
+            quorumBitmask: quorumBitmask,
+            minimumStake: MINIMUM_STAKE,
+            status: TaskStatus.Pending,
+            resultHash: bytes32(0),
+            createdAt: block.timestamp,
+            completedAt: 0,
+            assignedOperators: assignedOperators
+        });
+        
+        emit TaskCreated(taskId, ordersSetHash, deadline, assignedOperators);
+        
+        return taskId;
+    }
+
+    /// @notice Submit a matching task response
+    /// @param taskId The task identifier
+    /// @param resultHash Hash of the matching result
+    /// @param zkProof Zero-knowledge proof of valid matching
+    /// @param operatorSignatures Signatures from participating operators
+    function submitTaskResponse(
+        bytes32 taskId,
+        bytes32 resultHash,
+        bytes calldata zkProof,
+        bytes calldata operatorSignatures
+    ) external onlyRegisteredOperator {
+        MatchingTask storage task = tasks[taskId];
+        require(task.taskId != bytes32(0), "Task not found");
+        require(task.status == TaskStatus.Pending, "Task not pending");
+        require(block.timestamp <= task.deadline, "Task deadline passed");
+        require(!usedResults[resultHash], "Result already used");
+        
+        // Verify operator is assigned to this task
+        bool isAssigned = false;
+        for (uint256 i = 0; i < task.assignedOperators.length; i++) {
+            if (task.assignedOperators[i] == msg.sender) {
+                isAssigned = true;
+                break;
+            }
+        }
+        require(isAssigned, "Operator not assigned to task");
+        
+        // Verify ZK proof
+        ZKProofLib.MatchingPublicInputs memory publicInputs = ZKProofLib.MatchingPublicInputs({
+            ordersSetHash: task.ordersSetHash,
+            matchResultHash: resultHash,
+            totalVolume: 0, // Should be extracted from proof
+            averagePrice: 0, // Should be extracted from proof
+            timestamp: block.timestamp
+        });
+        
+        bytes memory verificationKey = new bytes(32); // Mock verification key
+        ZKProofLib.ProofResult proofResult = ZKProofLib.verifyMatchingProof(
+            zkProof,
+            publicInputs,
+            verificationKey
+        );
+        
+        require(proofResult == ZKProofLib.ProofResult.Valid, "Invalid ZK proof");
+        
+        // Parse and verify operator signatures
+        address[] memory respondingOperators = _parseOperatorSignatures(
+            operatorSignatures,
+            resultHash,
+            task.assignedOperators
+        );
+        
+        require(respondingOperators.length >= _getRequiredQuorum(task.quorumBitmask), 
+                "Insufficient operator responses");
+        
+        // Mark result as used
+        usedResults[resultHash] = true;
+        
+        // Update task
+        task.status = TaskStatus.Completed;
+        task.resultHash = resultHash;
+        task.completedAt = block.timestamp;
+        
+        // Store response
+        taskResponses[taskId] = TaskResponse({
+            taskId: taskId,
+            resultHash: resultHash,
+            zkProof: zkProof,
+            operatorSignatures: operatorSignatures,
+            timestamp: block.timestamp,
+            respondingOperators: respondingOperators
+        });
+        
+        // Update operator metrics
+        _updateOperatorMetrics(respondingOperators, task.createdAt);
+        
+        // Execute matched orders via hook
+        eigenVaultHook.executeVaultOrder(taskId, zkProof, operatorSignatures);
+        
+        // Distribute rewards
+        _distributeRewards(taskId, respondingOperators);
+        
+        emit TaskCompleted(taskId, resultHash, respondingOperators, block.timestamp);
+    }
+
+    /// @notice Challenge a completed task
+    /// @param taskId The task identifier  
+    /// @param reason The challenge reason
+    function challengeTask(bytes32 taskId, string calldata reason) external {
+        MatchingTask storage task = tasks[taskId];
+        require(task.taskId != bytes32(0), "Task not found");
+        require(task.status == TaskStatus.Completed, "Task not completed");
+        require(
+            block.timestamp <= task.completedAt + CHALLENGE_WINDOW,
+            "Challenge window expired"
+        );
+        
+        task.status = TaskStatus.Challenged;
+        
+        emit TaskChallenged(taskId, msg.sender, reason);
+        
+        // Challenge resolution would be implemented here
+        // For now, we'll assume challenges are resolved off-chain
+    }
+
+    /// @notice Slash operators for malicious behavior
+    /// @param operators The operators to slash
+    /// @param taskId The related task ID
+    /// @param reason The slashing reason
+    function slashOperators(
+        address[] calldata operators,
+        bytes32 taskId,
+        string calldata reason
+    ) external onlyOwner {
+        MatchingTask storage task = tasks[taskId];
+        require(task.taskId != bytes32(0), "Task not found");
+        
+        for (uint256 i = 0; i < operators.length; i++) {
+            address operator = operators[i];
+            
+            // Update operator metrics
+            operatorMetrics[operator].tasksSlashed++;
+            operatorMetrics[operator].isActive = false;
+            
+            // Slash via EigenLayer (would be implemented with actual slashing logic)
+            uint256 slashAmount = MINIMUM_STAKE / 4; // 25% slash
+            
+            emit OperatorSlashed(operator, taskId, slashAmount, reason);
+        }
+        
+        task.status = TaskStatus.Slashed;
+    }
+
+    /// @notice Get task details
+    /// @param taskId The task identifier
+    /// @return task The task details
+    function getTask(bytes32 taskId) external view returns (MatchingTask memory task) {
+        return tasks[taskId];
+    }
+
+    /// @notice Get task response
+    /// @param taskId The task identifier
+    /// @return response The task response
+    function getTaskResponse(bytes32 taskId) external view returns (TaskResponse memory response) {
+        return taskResponses[taskId];
+    }
+
+    /// @notice Get operator metrics
+    /// @param operator The operator address
+    /// @return metrics The operator metrics
+    function getOperatorMetrics(address operator) external view returns (OperatorMetrics memory metrics) {
+        return operatorMetrics[operator];
+    }
+
+    /// @notice Get active operators count
+    /// @return count The number of active operators
+    function getActiveOperatorsCount() external view returns (uint256 count) {
+        return activeOperators.length;
+    }
+
+    /// @notice Internal function to select operators for a task
+    /// @param quorumBitmask The quorum configuration
+    /// @return selectedOperators The selected operators
+    function _selectOperators(bytes32 quorumBitmask) 
+        internal 
+        view 
+        returns (address[] memory selectedOperators) 
+    {
+        // Simple selection - in production this would be more sophisticated
+        uint256 requiredCount = _getRequiredQuorum(quorumBitmask);
+        
+        if (activeOperators.length < requiredCount) {
+            return new address[](0);
+        }
+        
+        selectedOperators = new address[](requiredCount);
+        for (uint256 i = 0; i < requiredCount; i++) {
+            selectedOperators[i] = activeOperators[i];
+        }
+        
+        return selectedOperators;
+    }
+
+    /// @notice Internal function to get required quorum size
+    /// @param quorumBitmask The quorum configuration
+    /// @return size The required quorum size
+    function _getRequiredQuorum(bytes32 quorumBitmask) internal pure returns (uint256 size) {
+        // Simple implementation - extract from bitmask
+        return uint256(quorumBitmask) % 10 + 1; // 1-10 operators
+    }
+
+    /// @notice Internal function to parse operator signatures
+    /// @param signatures The concatenated signatures
+    /// @param messageHash The message hash that was signed
+    /// @param assignedOperators The operators assigned to the task
+    /// @return respondingOperators The operators who provided valid signatures
+    function _parseOperatorSignatures(
+        bytes memory signatures,
+        bytes32 messageHash,
+        address[] memory assignedOperators
+    ) internal pure returns (address[] memory respondingOperators) {
+        uint256 signatureCount = signatures.length / 65;
+        address[] memory tempOperators = new address[](signatureCount);
+        uint256 validCount = 0;
+        
+        for (uint256 i = 0; i < signatureCount; i++) {
+            bytes memory sig = new bytes(65);
+            for (uint256 j = 0; j < 65; j++) {
+                sig[j] = signatures[i * 65 + j];
+            }
+            
+            // Verify signature
+            for (uint256 k = 0; k < assignedOperators.length; k++) {
+                if (ZKProofLib.verifyOperatorSignature(messageHash, sig, assignedOperators[k])) {
+                    tempOperators[validCount] = assignedOperators[k];
+                    validCount++;
+                    break;
+                }
+            }
+        }
+        
+        // Copy valid operators to result array
+        respondingOperators = new address[](validCount);
+        for (uint256 i = 0; i < validCount; i++) {
+            respondingOperators[i] = tempOperators[i];
+        }
+        
+        return respondingOperators;
+    }
+
+    /// @notice Internal function to update operator metrics
+    /// @param operators The operators to update
+    /// @param taskCreatedAt When the task was created
+    function _updateOperatorMetrics(address[] memory operators, uint256 taskCreatedAt) internal {
+        uint256 responseTime = block.timestamp - taskCreatedAt;
+        
+        for (uint256 i = 0; i < operators.length; i++) {
+            OperatorMetrics storage metrics = operatorMetrics[operators[i]];
+            metrics.tasksCompleted++;
+            metrics.lastActiveTime = block.timestamp;
+            
+            // Update average response time
+            if (metrics.averageResponseTime == 0) {
+                metrics.averageResponseTime = responseTime;
+            } else {
+                metrics.averageResponseTime = 
+                    (metrics.averageResponseTime + responseTime) / 2;
+            }
+            
+            metrics.isActive = true;
+        }
+    }
+
+    /// @notice Internal function to distribute rewards
+    /// @param taskId The task identifier
+    /// @param operators The operators to reward
+    function _distributeRewards(bytes32 taskId, address[] memory operators) internal {
+        uint256 totalReward = BASE_TASK_REWARD;
+        uint256 rewardPerOperator = totalReward / operators.length;
+        uint256[] memory rewards = new uint256[](operators.length);
+        
+        for (uint256 i = 0; i < operators.length; i++) {
+            rewards[i] = rewardPerOperator;
+            operatorMetrics[operators[i]].totalRewards += rewardPerOperator;
+            
+            // In production, this would actually transfer rewards
+            // payable(operators[i]).transfer(rewardPerOperator);
+        }
+        
+        emit RewardsDistributed(taskId, operators, rewards);
+    }
+
+    /// @notice Register operator (called by operators)
+    function registerOperator() external {
+        require(
+            registryCoordinator.getOperatorStatus(msg.sender) == 
+            IRegistryCoordinator.OperatorStatus.REGISTERED,
+            "Must register with registry coordinator first"
+        );
+        
+        // Initialize operator metrics
+        if (!operatorMetrics[msg.sender].isActive) {
+            operatorMetrics[msg.sender] = OperatorMetrics({
+                tasksCompleted: 0,
+                tasksSlashed: 0,
+                totalRewards: 0,
+                lastActiveTime: block.timestamp,
+                averageResponseTime: 0,
+                isActive: true
+            });
+            
+            activeOperators.push(msg.sender);
+        }
+    }
+
+    /// @notice Deregister operator
+    function deregisterOperator() external onlyRegisteredOperator {
+        operatorMetrics[msg.sender].isActive = false;
+        
+        // Remove from active operators list
+        for (uint256 i = 0; i < activeOperators.length; i++) {
+            if (activeOperators[i] == msg.sender) {
+                activeOperators[i] = activeOperators[activeOperators.length - 1];
+                activeOperators.pop();
+                break;
+            }
+        }
+    }
+
+    /// @notice Transfer ownership
+    /// @param newOwner The new owner address
+    function transferOwnership(address newOwner) external onlyOwner {
+        require(newOwner != address(0), "Invalid address");
+        owner = newOwner;
+    }
+}

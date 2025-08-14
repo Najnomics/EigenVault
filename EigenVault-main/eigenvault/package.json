@@ -1,0 +1,47 @@
+{
+  "name": "eigenvault",
+  "version": "0.1.0",
+  "description": "Privacy-preserving trading infrastructure combining Uniswap v4 Hooks with EigenLayer AVS",
+  "main": "index.js",
+  "scripts": {
+    "build": "forge build",
+    "test": "forge test -v",
+    "test:integration": "forge test --match-contract Integration -v",
+    "test:load": "./scripts/benchmark.sh",
+    "deploy:local": "./scripts/deploy-local.sh",
+    "deploy:unichain": "forge script contracts/script/DeployEigenVault.s.sol --broadcast --rpc-url $UNICHAIN_RPC_URL",
+    "deploy:holesky": "forge script contracts/script/DeployEigenVault.s.sol --broadcast --rpc-url $HOLESKY_RPC_URL",
+    "lint": "solhint contracts/src/**/*.sol",
+    "format": "forge fmt",
+    "operator:build": "cd operator && cargo build --release",
+    "operator:test": "cd operator && cargo test",
+    "operator:start": "./scripts/start-operator.sh",
+    "circuits:compile": "cd circuits && ./scripts/compile.sh",
+    "circuits:setup": "cd circuits && ./scripts/setup.sh",
+    "frontend:dev": "cd frontend && npm run dev",
+    "frontend:build": "cd frontend && npm run build",
+    "monitoring:up": "cd monitoring && docker-compose up -d",
+    "monitoring:down": "cd monitoring && docker-compose down"
+  },
+  "keywords": [
+    "uniswap",
+    "eigenlayer",
+    "dark-pool",
+    "privacy",
+    "defi",
+    "hooks",
+    "avs",
+    "zero-knowledge"
+  ],
+  "author": "EigenVault Team",
+  "license": "MIT",
+  "devDependencies": {
+    "@solidity-parser/parser": "^0.14.0",
+    "solhint": "^3.4.1"
+  },
+  "dependencies": {
+    "ethers": "^6.7.1",
+    "axios": "^1.5.0",
+    "dotenv": "^16.3.1"
+  }
+}

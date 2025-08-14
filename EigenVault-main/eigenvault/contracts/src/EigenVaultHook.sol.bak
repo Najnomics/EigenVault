@@ -1,0 +1,325 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.26;
+
+import {BaseHook} from "@uniswap/v4-periphery/src/utils/BaseHook.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
+import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+
+import {IEigenVaultHook} from "./interfaces/IEigenVaultHook.sol";
+import {IOrderVault} from "./interfaces/IOrderVault.sol";
+import {OrderLib} from "./libraries/OrderLib.sol";
+import {ZKProofLib} from "./libraries/ZKProofLib.sol";
+
+/// @title EigenVaultHook
+/// @notice Uniswap v4 Hook that routes large orders to EigenLayer AVS for private matching
+contract EigenVaultHook is BaseHook, IEigenVaultHook {
+    using OrderLib for OrderLib.Order;
+    using ZKProofLib for bytes;
+    using CurrencyLibrary for Currency;
+
+    /// @notice The service manager contract for EigenLayer AVS
+    address public immutable serviceManager;
+    
+    /// @notice The order vault contract for encrypted order storage
+    IOrderVault public immutable orderVault;
+    
+    /// @notice Default vault threshold in basis points (1% = 100 bps)
+    uint256 public vaultThresholdBps = 100;
+    
+    /// @notice Maximum order deadline (24 hours)
+    uint256 public constant MAX_ORDER_DEADLINE = 24 hours;
+    
+    /// @notice Minimum order deadline (5 minutes)
+    uint256 public constant MIN_ORDER_DEADLINE = 5 minutes;
+
+    /// @notice Mapping of order IDs to order details
+    mapping(bytes32 => PrivateOrder) public orders;
+    
+    /// @notice Mapping of pool keys to custom thresholds
+    mapping(bytes32 => uint256) public poolThresholds;
+    
+    /// @notice Mapping of order commitments to prevent replay
+    mapping(bytes32 => bool) public usedCommitments;
+    
+    /// @notice Mapping of nullifiers to prevent double spending
+    mapping(bytes32 => bool) public usedNullifiers;
+    
+    /// @notice Order nonce counter
+    uint256 public orderNonce;
+    
+    /// @notice Contract owner
+    address public owner;
+
+    /// @notice Modifier to restrict access to owner
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Not owner");
+        _;
+    }
+
+    /// @notice Modifier to restrict access to service manager
+    modifier onlyServiceManager() {
+        require(msg.sender == serviceManager, "Not service manager");
+        _;
+    }
+
+    /// @notice Constructor
+    /// @param _poolManager The Uniswap v4 pool manager
+    /// @param _serviceManager The EigenLayer service manager
+    /// @param _orderVault The order vault contract
+    constructor(
+        IPoolManager _poolManager,
+        address _serviceManager,
+        IOrderVault _orderVault
+    ) BaseHook(_poolManager) {
+        serviceManager = _serviceManager;
+        orderVault = _orderVault;
+        owner = msg.sender;
+    }
+
+    /// @inheritdoc BaseHook
+    function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
+        return Hooks.Permissions({
+            beforeInitialize: false,
+            afterInitialize: false,
+            beforeAddLiquidity: false,
+            beforeRemoveLiquidity: false,
+            afterAddLiquidity: false,
+            afterRemoveLiquidity: false,
+            beforeSwap: true,
+            afterSwap: false,
+            beforeDonate: false,
+            afterDonate: false,
+            beforeSwapReturnDelta: true,
+            afterSwapReturnDelta: false,
+            afterAddLiquidityReturnDelta: false,
+            afterRemoveLiquidityReturnDelta: false
+        });
+    }
+
+    /// @inheritdoc BaseHook
+    function beforeSwap(
+        address sender,
+        PoolKey calldata key,
+        IPoolManager.SwapParams calldata params,
+        bytes calldata hookData
+    ) external override onlyPoolManager returns (bytes4, BeforeSwapDelta, uint24) {
+        // Check if this is a large order that should be routed to vault
+        if (isLargeOrder(params.amountSpecified, key)) {
+            bytes32 orderId = routeToVault(sender, key, params, hookData);
+            
+            // Return early to prevent immediate AMM execution
+            // The order will be executed later via executeVaultOrder
+            return (
+                BaseHook.beforeSwap.selector,
+                BeforeSwapDeltaLibrary.ZERO_DELTA,
+                0
+            );
+        }
+
+        // For small orders, proceed with normal AMM execution
+        return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+    }
+
+    /// @inheritdoc IEigenVaultHook
+    function isLargeOrder(int256 amountSpecified, PoolKey calldata key) public view returns (bool) {
+        uint256 absAmount = amountSpecified < 0 ? uint256(-amountSpecified) : uint256(amountSpecified);
+        
+        // Get pool-specific threshold or use default
+        bytes32 poolId = keccak256(abi.encode(key));
+        uint256 threshold = poolThresholds[poolId];
+        if (threshold == 0) {
+            threshold = vaultThresholdBps;
+        }
+        
+        // For simplicity, we'll use a fixed liquidity base
+        // In production, this should query actual pool liquidity
+        uint256 poolLiquidity = 1000000e18; // Mock 1M token liquidity
+        uint256 thresholdAmount = OrderLib.calculateThreshold(poolLiquidity, threshold);
+        
+        return absAmount >= thresholdAmount;
+    }
+
+    /// @inheritdoc IEigenVaultHook
+    function routeToVault(
+        address trader,
+        PoolKey calldata key,
+        IPoolManager.SwapParams calldata params,
+        bytes calldata hookData
+    ) public returns (bytes32 orderId) {
+        require(trader != address(0), "Invalid trader");
+        
+        // Parse hook data for commitment and deadline
+        (bytes32 commitment, uint256 deadline, bytes memory encryptedOrder) = 
+            abi.decode(hookData, (bytes32, uint256, bytes));
+        
+        // Validate deadline
+        require(
+            deadline > block.timestamp + MIN_ORDER_DEADLINE && 
+            deadline <= block.timestamp + MAX_ORDER_DEADLINE,
+            "Invalid deadline"
+        );
+        
+        // Check commitment hasn't been used
+        require(!usedCommitments[commitment], "Commitment already used");
+        usedCommitments[commitment] = true;
+        
+        // Generate unique order ID
+        orderId = OrderLib.generateOrderId(trader, key, params, ++orderNonce);
+        
+        // Create private order
+        PrivateOrder memory order = PrivateOrder({
+            trader: trader,
+            poolKey: key,
+            zeroForOne: params.zeroForOne,
+            amountSpecified: params.amountSpecified,
+            commitment: commitment,
+            deadline: deadline,
+            timestamp: block.timestamp,
+            executed: false
+        });
+        
+        // Store order
+        orders[orderId] = order;
+        
+        // Store encrypted order in vault
+        orderVault.storeOrder(orderId, trader, encryptedOrder, deadline);
+        
+        emit OrderRoutedToVault(
+            trader,
+            orderId,
+            key,
+            params.zeroForOne,
+            uint256(params.amountSpecified),
+            commitment
+        );
+        
+        return orderId;
+    }
+
+    /// @inheritdoc IEigenVaultHook
+    function executeVaultOrder(
+        bytes32 orderId,
+        bytes calldata proof,
+        bytes calldata signatures
+    ) external onlyServiceManager {
+        PrivateOrder storage order = orders[orderId];
+        require(order.trader != address(0), "Order not found");
+        require(!order.executed, "Order already executed");
+        require(block.timestamp <= order.deadline, "Order expired");
+        
+        // Verify ZK proof
+        ZKProofLib.MatchingPublicInputs memory publicInputs = ZKProofLib.MatchingPublicInputs({
+            ordersSetHash: keccak256(abi.encodePacked(orderId)),
+            matchResultHash: keccak256(proof),
+            totalVolume: uint256(order.amountSpecified),
+            averagePrice: 0, // Should be extracted from proof
+            timestamp: block.timestamp
+        });
+        
+        bytes memory verificationKey = new bytes(32); // Mock verification key
+        ZKProofLib.ProofResult result = ZKProofLib.verifyMatchingProof(
+            proof,
+            publicInputs,
+            verificationKey
+        );
+        
+        require(result == ZKProofLib.ProofResult.Valid, "Invalid proof");
+        
+        // Mark order as executed
+        order.executed = true;
+        
+        // Execute the swap via pool manager
+        (uint256 amountIn, uint256 amountOut) = _executeSwap(order);
+        
+        emit VaultOrderExecuted(
+            orderId,
+            order.trader,
+            amountIn,
+            amountOut,
+            keccak256(proof)
+        );
+    }
+
+    /// @inheritdoc IEigenVaultHook
+    function fallbackToAMM(bytes32 orderId) external {
+        PrivateOrder storage order = orders[orderId];
+        require(order.trader != address(0), "Order not found");
+        require(!order.executed, "Order already executed");
+        require(
+            block.timestamp > order.deadline || msg.sender == order.trader,
+            "Cannot fallback yet"
+        );
+        
+        // Execute directly via AMM
+        _executeSwap(order);
+        order.executed = true;
+        
+        emit OrderFallbackToAMM(orderId, order.trader, "Deadline exceeded or trader requested");
+    }
+
+    /// @inheritdoc IEigenVaultHook
+    function getOrder(bytes32 orderId) external view returns (PrivateOrder memory order) {
+        return orders[orderId];
+    }
+
+    /// @inheritdoc IEigenVaultHook
+    function getVaultThreshold(PoolKey calldata key) external view returns (uint256 threshold) {
+        bytes32 poolId = keccak256(abi.encode(key));
+        threshold = poolThresholds[poolId];
+        if (threshold == 0) {
+            threshold = vaultThresholdBps;
+        }
+    }
+
+    /// @inheritdoc IEigenVaultHook
+    function updateVaultThreshold(uint256 newThreshold) external onlyOwner {
+        require(newThreshold > 0 && newThreshold <= 1000, "Invalid threshold"); // Max 10%
+        uint256 oldThreshold = vaultThresholdBps;
+        vaultThresholdBps = newThreshold;
+        emit VaultThresholdUpdated(oldThreshold, newThreshold);
+    }
+
+    /// @notice Set pool-specific threshold
+    /// @param key The pool key
+    /// @param threshold The threshold in basis points
+    function setPoolThreshold(PoolKey calldata key, uint256 threshold) external onlyOwner {
+        require(threshold <= 1000, "Invalid threshold");
+        bytes32 poolId = keccak256(abi.encode(key));
+        poolThresholds[poolId] = threshold;
+    }
+
+    /// @notice Transfer ownership
+    /// @param newOwner The new owner address
+    function transferOwnership(address newOwner) external onlyOwner {
+        require(newOwner != address(0), "Invalid address");
+        owner = newOwner;
+    }
+
+    /// @notice Internal function to execute swap via pool manager
+    /// @param order The order to execute
+    /// @return amountIn The input amount
+    /// @return amountOut The output amount
+    function _executeSwap(PrivateOrder memory order) 
+        internal 
+        returns (uint256 amountIn, uint256 amountOut) 
+    {
+        IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
+            zeroForOne: order.zeroForOne,
+            amountSpecified: order.amountSpecified,
+            sqrtPriceLimitX96: order.zeroForOne ? 4295128739 : 1461446703485210103287273052203988822378723970341
+        });
+        
+        // Execute swap
+        // Note: This is simplified - production would need proper delta handling
+        poolManager.swap(order.poolKey, params, new bytes(0));
+        
+        // Mock return values - in production, these would come from the swap result
+        amountIn = uint256(order.amountSpecified > 0 ? order.amountSpecified : -order.amountSpecified);
+        amountOut = amountIn * 99 / 100; // Mock 1% slippage
+        
+        return (amountIn, amountOut);
+    }
+}
