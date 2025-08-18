@@ -1,0 +1,23 @@
+[profile.default]
+src = "contracts/src"
+out = "contracts/out"
+test = "contracts/test"
+libs = ["lib"]
+solc_version = "0.8.26"
+evm_version = "cancun"
+optimizer_runs = 800
+via_ir = false
+ffi = true
+
+remappings = [
+    "@eigenlayer/=lib/eigenlayer-contracts/src/contracts/",
+    "@eigenlayer-middleware/=lib/eigenlayer-middleware/src/",
+    "@uniswap/v4-core/=lib/v4-core/",
+    "@uniswap/v4-periphery/=lib/v4-periphery/",
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "@forge-std/=lib/forge-std/src/"
+]
+
+[rpc_endpoints]
+unichain = "https://sepolia.unichain.org"
+holesky = "https://ethereum-holesky-rpc.publicnode.com"

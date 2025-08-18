@@ -1,0 +1,145 @@
+version: '3.8'
+
+services:
+  # EigenVault Operator
+  eigenvault-operator:
+    build:
+      context: ..
+      dockerfile: docker/operator.Dockerfile
+    container_name: eigenvault-operator
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    volumes:
+      - operator_keys:/app/keys
+      - operator_logs:/app/logs
+      - operator_data:/app/data
+      - ./config/operator.yaml:/app/config.yaml:ro
+    environment:
+      - RUST_LOG=info
+      - OPERATOR_ADDRESS=${OPERATOR_ADDRESS}
+      - OPERATOR_PRIVATE_KEY=${OPERATOR_PRIVATE_KEY}
+      - ETHEREUM_RPC_URL=${ETHEREUM_RPC_URL}
+      - SERVICE_MANAGER_ADDRESS=${SERVICE_MANAGER_ADDRESS}
+    networks:
+      - eigenvault
+    depends_on:
+      - mongodb
+      - prometheus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Frontend
+  eigenvault-frontend:
+    build:
+      context: ..
+      dockerfile: docker/frontend.Dockerfile
+    container_name: eigenvault-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    environment:
+      - REACT_APP_BACKEND_URL=${REACT_APP_BACKEND_URL}
+      - REACT_APP_CHAIN_ID=${REACT_APP_CHAIN_ID}
+    networks:
+      - eigenvault
+    depends_on:
+      - eigenvault-operator
+
+  # MongoDB
+  mongodb:
+    image: mongo:6.0
+    container_name: eigenvault-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+      - ./config/mongodb.conf:/etc/mongo/mongod.conf:ro
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_ROOT_USERNAME:-admin}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_ROOT_PASSWORD:-password}
+      - MONGO_INITDB_DATABASE=eigenvault
+    networks:
+      - eigenvault
+    command: mongod --config /etc/mongo/mongod.conf
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: eigenvault-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - prometheus_data:/prometheus
+      - ../monitoring/prometheus/config:/etc/prometheus:ro
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - eigenvault
+
+  # Grafana
+  grafana:
+    image: grafana/grafana:latest
+    container_name: eigenvault-grafana
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ../monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    networks:
+      - eigenvault
+    depends_on:
+      - prometheus
+
+  # Redis (for caching)
+  redis:
+    image: redis:7-alpine
+    container_name: eigenvault-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - eigenvault
+
+volumes:
+  operator_keys:
+    driver: local
+  operator_logs:
+    driver: local
+  operator_data:
+    driver: local
+  mongodb_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  eigenvault:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16

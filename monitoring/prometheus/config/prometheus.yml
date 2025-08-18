@@ -1,0 +1,79 @@
+# Prometheus configuration for EigenVault monitoring
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - "alert_rules.yml"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          - alertmanager:9093
+
+scrape_configs:
+  # EigenVault Operator metrics
+  - job_name: 'eigenvault-operator'
+    static_configs:
+      - targets: ['eigenvault-operator:9000']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    scrape_timeout: 5s
+
+  # Node exporter for system metrics
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+    scrape_interval: 15s
+
+  # MongoDB metrics
+  - job_name: 'mongodb'
+    static_configs:
+      - targets: ['mongodb-exporter:9216']
+    scrape_interval: 15s
+
+  # Ethereum node metrics (if available)
+  - job_name: 'ethereum-node'
+    static_configs:
+      - targets: ['localhost:8545']
+    metrics_path: '/debug/metrics/prometheus'
+    scrape_interval: 30s
+
+  # Frontend metrics (if instrumented)
+  - job_name: 'eigenvault-frontend'
+    static_configs:
+      - targets: ['eigenvault-frontend:80']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+# Recording rules for common queries
+recording_rules:
+  - name: eigenvault_operator_rules
+    rules:
+      - record: eigenvault:orders_processed_rate
+        expr: rate(eigenvault_orders_processed_total[5m])
+      
+      - record: eigenvault:matching_success_rate
+        expr: rate(eigenvault_matches_successful_total[5m]) / rate(eigenvault_matches_attempted_total[5m])
+      
+      - record: eigenvault:proof_generation_time_avg
+        expr: rate(eigenvault_proof_generation_duration_seconds_sum[5m]) / rate(eigenvault_proof_generation_duration_seconds_count[5m])
+      
+      - record: eigenvault:ethereum_events_rate
+        expr: rate(eigenvault_ethereum_events_total[5m])
+      
+      - record: eigenvault:p2p_messages_rate
+        expr: rate(eigenvault_p2p_messages_total[5m])
+
+# Storage configuration
+storage:
+  tsdb:
+    retention.time: 30d
+    retention.size: 10GB

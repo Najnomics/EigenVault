@@ -1,0 +1,584 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.26;
+
+import "../src/EigenVaultServiceManager.sol";
+import "../src/OrderVault.sol";
+import "../src/EigenVaultHook.sol";
+import "./mocks/MockPoolManager.sol";
+import "./mocks/MockERC20.sol";
+import "./utils/EigenVaultTestBase.sol";
+
+/// @title EigenVaultServiceManager Test Suite
+/// @notice Comprehensive test suite for EigenVaultServiceManager contract
+contract EigenVaultServiceManagerTest is EigenVaultTestBase {
+    EigenVaultServiceManager public serviceManager;
+    EigenVaultHook public hook;
+    OrderVault public orderVault;
+
+    // Use addresses from EigenVaultTestBase
+
+    function setUp() public {
+        // Deploy order vault
+        orderVault = new OrderVault();
+
+        // Deploy service manager with simplified constructor
+        serviceManager = new EigenVaultServiceManager(
+            IEigenVaultHook(address(0)), // Will update after hook deployment
+            IOrderVault(address(orderVault))
+        );
+
+        // Deploy hook with simplified constructor
+        hook = new EigenVaultHook(
+            IPoolManager(address(mockPoolManager)),
+            orderVault
+        );
+
+        // Update service manager reference in hook (if needed)
+        // This would require additional setup in production
+
+        // Setup initial stakes for operators
+        stakeRegistry.setOperatorStake(operator1, 32 ether);
+        stakeRegistry.setOperatorStake(operator2, 35 ether);
+        stakeRegistry.setOperatorStake(operator3, 40 ether);
+    }
+
+    /// @notice Test contract deployment and initialization
+    function testDeployment() public {
+        assertEq(address(serviceManager.avsDirectory()), address(avsDirectory));
+        assertEq(address(serviceManager.stakeRegistry()), address(stakeRegistry));
+        assertEq(address(serviceManager.orderVault()), address(orderVault));
+        assertEq(serviceManager.owner(), address(this));
+        assertEq(serviceManager.taskCounter(), 0);
+        assertEq(serviceManager.baseTaskReward(), 0.01 ether);
+    }
+
+    /// @notice Test operator registration
+    function testOperatorRegistration() public {
+        vm.expectEmit(true, false, false, false);
+        emit EigenVaultServiceManager.OperatorRegistered(operator1, 32 ether);
+
+        vm.prank(operator1);
+        serviceManager.registerOperator();
+
+        assertTrue(serviceManager.registeredOperators(operator1));
+        assertEq(serviceManager.getActiveOperatorsCount(), 1);
+
+        EigenVaultServiceManager.OperatorMetrics memory metrics = serviceManager.getOperatorMetrics(operator1);
+        assertTrue(metrics.isActive);
+        assertEq(metrics.tasksCompleted, 0);
+        assertEq(metrics.successRate, 10000); // 100%
+    }
+
+    /// @notice Test operator registration with insufficient stake
+    function testOperatorRegistrationInsufficientStake() public {
+        address lowStakeOperator = address(0x999);
+        stakeRegistry.setOperatorStake(lowStakeOperator, 10 ether);
+
+        vm.prank(lowStakeOperator);
+        vm.expectRevert("Insufficient stake");
+        serviceManager.registerOperator();
+    }
+
+    /// @notice Test duplicate operator registration
+    function testDuplicateOperatorRegistration() public {
+        vm.prank(operator1);
+        serviceManager.registerOperator();
+
+        vm.prank(operator1);
+        vm.expectRevert("Already registered");
+        serviceManager.registerOperator();
+    }
+
+    /// @notice Test operator deregistration
+    function testOperatorDeregistration() public {
+        // First register
+        vm.prank(operator1);
+        serviceManager.registerOperator();
+
+        // Then deregister
+        vm.prank(operator1);
+        vm.expectEmit(true, false, false, false);
+        emit EigenVaultServiceManager.OperatorDeregistered(operator1, "Voluntary exit");
+
+        serviceManager.deregisterOperator("Voluntary exit");
+
+        assertFalse(serviceManager.registeredOperators(operator1));
+        assertEq(serviceManager.getActiveOperatorsCount(), 0);
+
+        EigenVaultServiceManager.OperatorMetrics memory metrics = serviceManager.getOperatorMetrics(operator1);
+        assertFalse(metrics.isActive);
+    }
+
+    /// @notice Test task creation
+    function testCreateMatchingTask() public {
+        // Register operators first
+        _registerOperators();
+
+        bytes32 ordersHash = keccak256("test_orders");
+        uint256 deadline = block.timestamp + 5 minutes;
+        bytes32 quorumBitmask = bytes32(uint256(7)); // First 3 operators
+
+        vm.expectEmit(true, true, false, false);
+        emit EigenVaultServiceManager.TaskCreated(
+            bytes32(0), // Task ID will be generated
+            ordersHash,
+            deadline,
+            new address[](0), // Operators will be selected
+            quorumBitmask
+        );
+
+        bytes32 taskId = serviceManager.createMatchingTask(ordersHash, deadline, quorumBitmask);
+
+        assertFalse(taskId == bytes32(0));
+        assertEq(serviceManager.taskCounter(), 1);
+
+        EigenVaultServiceManager.MatchingTask memory task = serviceManager.getTask(taskId);
+        assertEq(task.taskId, taskId);
+        assertEq(task.ordersSetHash, ordersHash);
+        assertEq(task.deadline, deadline);
+        assertEq(uint(task.status), uint(EigenVaultServiceManager.TaskStatus.Pending));
+    }
+
+    /// @notice Test task creation with invalid deadline
+    function testCreateMatchingTaskInvalidDeadline() public {
+        _registerOperators();
+
+        bytes32 ordersHash = keccak256("test_orders");
+        uint256 invalidDeadline = block.timestamp + 10; // Too soon
+
+        vm.expectRevert("Invalid deadline");
+        serviceManager.createMatchingTask(ordersHash, invalidDeadline, bytes32(0));
+    }
+
+    /// @notice Test task creation with no operators
+    function testCreateMatchingTaskNoOperators() public {
+        bytes32 ordersHash = keccak256("test_orders");
+        uint256 deadline = block.timestamp + 5 minutes;
+
+        vm.expectRevert("No active operators");
+        serviceManager.createMatchingTask(ordersHash, deadline, bytes32(0));
+    }
+
+    /// @notice Test task submission
+    function testSubmitTaskResponse() public {
+        // Setup task
+        _registerOperators();
+        bytes32 ordersHash = keccak256("test_orders");
+        bytes32 taskId = serviceManager.createMatchingTask(
+            ordersHash,
+            block.timestamp + 5 minutes,
+            bytes32(0)
+        );
+
+        // Create mock proof
+        bytes memory zkProof = abi.encode(
+            ZKProofLib.MatchingProof({
+                proofId: bytes32("test_proof"),
+                proof: "mock_proof_data",
+                publicInputs: new bytes32[](2),
+                verificationKey: "mock_vk",
+                timestamp: block.timestamp,
+                operators: new address[](1),
+                poolHash: ordersHash,
+                orderCount: 1
+            })
+        );
+
+        bytes32 resultHash = keccak256("result");
+        bytes memory signatures = "mock_signatures";
+
+        vm.expectEmit(true, false, false, false);
+        emit EigenVaultServiceManager.TaskCompleted(
+            taskId,
+            resultHash,
+            new address[](0),
+            0,
+            0
+        );
+
+        vm.prank(operator1);
+        serviceManager.submitTaskResponse(taskId, resultHash, zkProof, signatures);
+
+        EigenVaultServiceManager.MatchingTask memory task = serviceManager.getTask(taskId);
+        assertEq(uint(task.status), uint(EigenVaultServiceManager.TaskStatus.Completed));
+        assertEq(task.resultHash, resultHash);
+
+        EigenVaultServiceManager.OperatorMetrics memory metrics = serviceManager.getOperatorMetrics(operator1);
+        assertEq(metrics.tasksCompleted, 1);
+    }
+
+    /// @notice Test task submission by unregistered operator
+    function testSubmitTaskResponseUnregistered() public {
+        _registerOperators();
+        bytes32 taskId = serviceManager.createMatchingTask(
+            keccak256("orders"),
+            block.timestamp + 5 minutes,
+            bytes32(0)
+        );
+
+        address unregisteredOperator = address(0x999);
+        vm.prank(unregisteredOperator);
+        vm.expectRevert("Operator not registered");
+        serviceManager.submitTaskResponse(taskId, bytes32(0), "", "");
+    }
+
+    /// @notice Test task submission for non-existent task
+    function testSubmitTaskResponseNonExistent() public {
+        _registerOperators();
+
+        vm.prank(operator1);
+        vm.expectRevert("Task not found");
+        serviceManager.submitTaskResponse(keccak256("fake"), bytes32(0), "", "");
+    }
+
+    /// @notice Test task submission after deadline
+    function testSubmitTaskResponseAfterDeadline() public {
+        _registerOperators();
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes32 taskId = serviceManager.createMatchingTask(
+            keccak256("orders"),
+            deadline,
+            bytes32(0)
+        );
+
+        // Fast forward past deadline
+        vm.warp(deadline + 1);
+
+        vm.prank(operator1);
+        vm.expectRevert("Task deadline passed");
+        serviceManager.submitTaskResponse(taskId, bytes32(0), "", "");
+    }
+
+    /// @notice Test operator slashing
+    function testOperatorSlashing() public {
+        _registerOperators();
+
+        uint256 slashingType = 0; // Invalid matching
+        bytes memory evidence = "fraud_proof";
+
+        vm.expectEmit(true, false, false, false);
+        emit EigenVaultServiceManager.OperatorSlashed(operator1, 16 ether, "Invalid matching");
+
+        serviceManager.slashOperator(operator1, slashingType, evidence);
+
+        EigenVaultServiceManager.OperatorMetrics memory metrics = serviceManager.getOperatorMetrics(operator1);
+        assertEq(metrics.slashingCount, 1);
+    }
+
+    /// @notice Test operator slashing unregistered
+    function testSlashUnregisteredOperator() public {
+        vm.expectRevert("Operator not registered");
+        serviceManager.slashOperator(address(0x999), 0, "evidence");
+    }
+
+    /// @notice Test operator slashing invalid type
+    function testSlashInvalidType() public {
+        _registerOperators();
+
+        vm.expectRevert("Invalid slashing type");
+        serviceManager.slashOperator(operator1, 10, "evidence");
+    }
+
+    /// @notice Test slashing parameters update
+    function testUpdateSlashingParams() public {
+        uint256 newInvalidMatching = 6000; // 60%
+        uint256 newOrderLeakage = 8000;    // 80%
+        uint256 newFrontRunning = 5000;    // 50%
+        uint256 newAvailability = 3000;    // 30%
+        uint256 newCollusion = 9000;       // 90%
+
+        vm.expectEmit(false, false, false, false);
+        emit EigenVaultServiceManager.SlashingParamsUpdated(
+            newInvalidMatching,
+            newOrderLeakage,
+            newFrontRunning,
+            newAvailability,
+            newCollusion
+        );
+
+        serviceManager.updateSlashingParams(
+            newInvalidMatching,
+            newOrderLeakage,
+            newFrontRunning,
+            newAvailability,
+            newCollusion
+        );
+
+        (uint256 invalidMatching,,,,,) = serviceManager.slashingParams();
+        assertEq(invalidMatching, newInvalidMatching);
+    }
+
+    /// @notice Test slashing parameters update with invalid values
+    function testUpdateSlashingParamsInvalid() public {
+        vm.expectRevert("Invalid percentage");
+        serviceManager.updateSlashingParams(10001, 5000, 5000, 5000, 5000);
+    }
+
+    /// @notice Test base task reward update
+    function testUpdateBaseTaskReward() public {
+        uint256 newReward = 0.02 ether;
+        serviceManager.updateBaseTaskReward(newReward);
+        assertEq(serviceManager.baseTaskReward(), newReward);
+    }
+
+    /// @notice Test base task reward update invalid
+    function testUpdateBaseTaskRewardInvalid() public {
+        vm.expectRevert("Invalid reward");
+        serviceManager.updateBaseTaskReward(0);
+    }
+
+    /// @notice Test minimum stake update
+    function testUpdateMinimumStake() public {
+        uint256 newMinimum = 64 ether;
+        serviceManager.updateMinimumStake(newMinimum);
+        assertEq(serviceManager.minimumStakePerOperator(), newMinimum);
+    }
+
+    /// @notice Test minimum stake update invalid
+    function testUpdateMinimumStakeInvalid() public {
+        vm.expectRevert("Invalid minimum");
+        serviceManager.updateMinimumStake(0);
+    }
+
+    /// @notice Test get active operators
+    function testGetActiveOperators() public {
+        _registerOperators();
+
+        address[] memory operators = serviceManager.getActiveOperators();
+        assertEq(operators.length, 3);
+        assertEq(operators[0], operator1);
+        assertEq(operators[1], operator2);
+        assertEq(operators[2], operator3);
+    }
+
+    /// @notice Test pause functionality
+    function testPauseFunctionality() public {
+        serviceManager.setPaused(true);
+        assertTrue(serviceManager.paused());
+
+        serviceManager.setPaused(false);
+        assertFalse(serviceManager.paused());
+    }
+
+    /// @notice Test task response time tracking
+    function testTaskResponseTimeTracking() public {
+        _registerOperators();
+        bytes32 taskId = serviceManager.createMatchingTask(
+            keccak256("orders"),
+            block.timestamp + 5 minutes,
+            bytes32(0)
+        );
+
+        uint256 startTime = block.timestamp;
+        
+        // Fast forward 2 minutes
+        vm.warp(startTime + 120);
+
+        bytes memory zkProof = abi.encode(
+            ZKProofLib.MatchingProof({
+                proofId: bytes32("test_proof"),
+                proof: "mock_proof_data",
+                publicInputs: new bytes32[](2),
+                verificationKey: "mock_vk",
+                timestamp: block.timestamp,
+                operators: new address[](1),
+                poolHash: keccak256("orders"),
+                orderCount: 1
+            })
+        );
+
+        vm.prank(operator1);
+        serviceManager.submitTaskResponse(taskId, keccak256("result"), zkProof, "signatures");
+
+        EigenVaultServiceManager.OperatorMetrics memory metrics = serviceManager.getOperatorMetrics(operator1);
+        assertEq(metrics.averageResponseTime, 120); // 2 minutes
+    }
+
+    /// @notice Test operator metrics calculation
+    function testOperatorMetricsCalculation() public {
+        _registerOperators();
+
+        // Submit multiple tasks
+        for (uint i = 0; i < 5; i++) {
+            bytes32 taskId = serviceManager.createMatchingTask(
+                keccak256(abi.encode("orders", i)),
+                block.timestamp + 5 minutes,
+                bytes32(0)
+            );
+
+            bytes memory zkProof = abi.encode(
+                ZKProofLib.MatchingProof({
+                    proofId: bytes32("test_proof"),
+                    proof: "mock_proof_data",
+                    publicInputs: new bytes32[](2),
+                    verificationKey: "mock_vk",
+                    timestamp: block.timestamp,
+                    operators: new address[](1),
+                    poolHash: keccak256(abi.encode("orders", i)),
+                    orderCount: 1
+                })
+            );
+
+            vm.prank(operator1);
+            serviceManager.submitTaskResponse(taskId, keccak256("result"), zkProof, "signatures");
+        }
+
+        EigenVaultServiceManager.OperatorMetrics memory metrics = serviceManager.getOperatorMetrics(operator1);
+        assertEq(metrics.tasksCompleted, 5);
+        assertTrue(metrics.totalRewards > 0);
+        assertEq(metrics.successRate, 10000); // 100% success rate
+    }
+
+    /// @notice Test rewards distribution
+    function testRewardsDistribution() public {
+        _registerOperators();
+        bytes32 taskId = serviceManager.createMatchingTask(
+            keccak256("orders"),
+            block.timestamp + 5 minutes,
+            bytes32(0)
+        );
+
+        bytes memory zkProof = abi.encode(
+            ZKProofLib.MatchingProof({
+                proofId: bytes32("test_proof"),
+                proof: "mock_proof_data",
+                publicInputs: new bytes32[](2),
+                verificationKey: "mock_vk",
+                timestamp: block.timestamp,
+                operators: new address[](1),
+                poolHash: keccak256("orders"),
+                orderCount: 1
+            })
+        );
+
+        uint256 initialRewards = serviceManager.getOperatorMetrics(operator1).totalRewards;
+
+        vm.expectEmit(true, false, false, false);
+        emit EigenVaultServiceManager.RewardsDistributed(
+            taskId,
+            new address[](0),
+            new uint256[](0),
+            0.01 ether
+        );
+
+        vm.prank(operator1);
+        serviceManager.submitTaskResponse(taskId, keccak256("result"), zkProof, "signatures");
+
+        uint256 finalRewards = serviceManager.getOperatorMetrics(operator1).totalRewards;
+        assertGt(finalRewards, initialRewards);
+        assertEq(serviceManager.totalRewardsDistributed(), 0.01 ether);
+    }
+
+    /// @notice Test performance bonus calculation
+    function testPerformanceBonusCalculation() public {
+        _registerOperators();
+        bytes32 taskId = serviceManager.createMatchingTask(
+            keccak256("orders"),
+            block.timestamp + 5 minutes,
+            bytes32(0)
+        );
+
+        // Submit response quickly (within 30 seconds)
+        vm.warp(block.timestamp + 25);
+
+        bytes memory zkProof = abi.encode(
+            ZKProofLib.MatchingProof({
+                proofId: bytes32("test_proof"),
+                proof: "mock_proof_data",
+                publicInputs: new bytes32[](2),
+                verificationKey: "mock_vk",
+                timestamp: block.timestamp,
+                operators: new address[](1),
+                poolHash: keccak256("orders"),
+                orderCount: 1
+            })
+        );
+
+        vm.prank(operator1);
+        serviceManager.submitTaskResponse(taskId, keccak256("result"), zkProof, "signatures");
+
+        // Fast response should get performance bonus
+        uint256 expectedBonus = (0.01 ether * 500) / 10000; // 5% bonus
+        uint256 expectedTotal = 0.01 ether + expectedBonus;
+
+        assertEq(serviceManager.getOperatorMetrics(operator1).totalRewards, expectedTotal);
+    }
+
+    /// @notice Test operator array management during deregistration
+    function testOperatorArrayManagement() public {
+        // Register 3 operators
+        _registerOperators();
+        assertEq(serviceManager.getActiveOperatorsCount(), 3);
+
+        // Deregister middle operator
+        vm.prank(operator2);
+        serviceManager.deregisterOperator("test");
+
+        assertEq(serviceManager.getActiveOperatorsCount(), 2);
+        address[] memory operators = serviceManager.getActiveOperators();
+        
+        // Should have moved last operator to middle position
+        assertTrue(operators[0] == operator1 || operators[0] == operator3);
+        assertTrue(operators[1] == operator1 || operators[1] == operator3);
+        assertFalse(operators[0] == operators[1]);
+    }
+
+    /// @notice Test edge case: single operator system
+    function testSingleOperatorSystem() public {
+        vm.prank(operator1);
+        serviceManager.registerOperator();
+
+        bytes32 taskId = serviceManager.createMatchingTask(
+            keccak256("orders"),
+            block.timestamp + 5 minutes,
+            bytes32(0)
+        );
+
+        EigenVaultServiceManager.MatchingTask memory task = serviceManager.getTask(taskId);
+        assertEq(task.assignedOperators.length, 1);
+        assertEq(task.assignedOperators[0], operator1);
+    }
+
+    /// @notice Test access control
+    function testAccessControl() public {
+        // Test owner-only functions
+        vm.prank(operator1);
+        vm.expectRevert("Ownable: caller is not the owner");
+        serviceManager.updateBaseTaskReward(0.02 ether);
+
+        vm.prank(operator1);
+        vm.expectRevert("Ownable: caller is not the owner");
+        serviceManager.slashOperator(operator2, 0, "evidence");
+    }
+
+    /// @notice Test gas optimization for batch operations
+    function testBatchOperationsGas() public {
+        uint256 gasBefore = gasleft();
+        
+        // Register multiple operators
+        for (uint i = 0; i < 10; i++) {
+            address operator = address(uint160(0x1000 + i));
+            stakeRegistry.setOperatorStake(operator, 32 ether);
+            vm.prank(operator);
+            serviceManager.registerOperator();
+        }
+        
+        uint256 gasAfter = gasleft();
+        uint256 gasUsed = gasBefore - gasAfter;
+        
+        // Ensure reasonable gas usage
+        assertLt(gasUsed, 5000000); // 5M gas limit
+    }
+
+    // Helper function to register multiple operators
+    function _registerOperators() internal {
+        vm.prank(operator1);
+        serviceManager.registerOperator();
+        
+        vm.prank(operator2);
+        serviceManager.registerOperator();
+        
+        vm.prank(operator3);
+        serviceManager.registerOperator();
+    }
+}

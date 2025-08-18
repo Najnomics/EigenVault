@@ -1,0 +1,38 @@
+{
+  "lib/forge-std": {
+    "tag": {
+      "name": "v1.10.0",
+      "rev": "8bbcf6e3f8f62f419e5429a0bd89331c85c37824"
+    }
+  },
+  "lib/v4-periphery": {
+    "branch": {
+      "name": "main",
+      "rev": "60cd93803ac2b7fa65fd6cd351fd5fd4cc8c9db5"
+    }
+  },
+  "lib/openzeppelin-contracts": {
+    "tag": {
+      "name": "v5.4.0",
+      "rev": "c64a1edb67b6e3f4a15cca8909c9482ad33a02b0"
+    }
+  },
+  "lib/eigenlayer-middleware": {
+    "tag": {
+      "name": "v1.3.1",
+      "rev": "fd26169c7f988a53ad9ca1e745f40754afed4ed4"
+    }
+  },
+  "lib/v4-core": {
+    "branch": {
+      "name": "main",
+      "rev": "59d3ecf53afa9264a16bba0e38f4c5d2231f80bc"
+    }
+  },
+  "lib/eigenlayer-contracts": {
+    "tag": {
+      "name": "v1.5.0",
+      "rev": "5dbb48339aeef41e11d65c8816f9489e53573fad"
+    }
+  }
+}
