@@ -87,7 +87,7 @@ contract ProductionContractsTest is Test {
     function testVaultThresholds() public {
         // Test default threshold
         uint256 defaultThreshold = eigenVaultHook.vaultThresholdBps();
-        assertEq(defaultThreshold, 100); // 1%
+        assertEq(defaultThreshold, 10); // 0.1% (set in test setup)
         
         // Test threshold update
         eigenVaultHook.updateVaultThreshold(200);
