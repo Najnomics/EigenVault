@@ -35,18 +35,27 @@ interface IOrderVault {
         uint256 timestamp;
         bool retrieved;
         bool expired;
+        bool executed;
     }
 
-    /// @notice Store an encrypted order in the vault
-    /// @param orderId The unique order identifier
-    /// @param trader The trader address
-    /// @param encryptedOrder The encrypted order data
+    /// @notice Store an order in the vault
+    /// @param orderId The order ID
+    /// @param amount The order amount
+    /// @param zeroForOne Whether this is a buy (false) or sell (true) order
+    /// @param price The order price
     /// @param deadline The order deadline
+    /// @param trader The order trader
+    /// @param commitment The order commitment hash
+    /// @param poolId The pool ID
     function storeOrder(
         bytes32 orderId,
+        uint256 amount,
+        bool zeroForOne,
+        uint256 price,
+        uint256 deadline,
         address trader,
-        bytes calldata encryptedOrder,
-        uint256 deadline
+        bytes32 commitment,
+        bytes32 poolId
     ) external;
 
     /// @notice Retrieve an encrypted order from the vault (operators only)

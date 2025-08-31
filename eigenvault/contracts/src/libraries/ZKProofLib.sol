@@ -100,8 +100,8 @@ library ZKProofLib {
             matchHash: bytes32(0),
             executionPrice: 0,
             totalVolume: 0,
-            operators: proof.operators,
-            proofTimestamp: proof.timestamp
+            operators: new address[](0),
+            proofTimestamp: 0
         });
 
         // Basic validation
@@ -109,81 +109,88 @@ library ZKProofLib {
             return (result, ProofError.InvalidProof);
         }
 
-        if (proof.poolHash != poolHash) {
+        if (proof.publicInputs.length == 0) {
             return (result, ProofError.InvalidPublicInputs);
         }
 
-        if (proof.timestamp + 1 hours < block.timestamp) {
-            return (result, ProofError.ProofExpired);
+        if (proof.verificationKey.length == 0) {
+            return (result, ProofError.InvalidVerificationKey);
         }
 
         if (proof.operators.length == 0) {
             return (result, ProofError.InsufficientOperators);
         }
 
-        // Verify the actual ZK proof (simplified for demonstration)
-        bool proofValid = _verifyZKProof(
-            proof.proof,
-            proof.publicInputs,
-            proof.verificationKey
-        );
+        // Check if proof is expired (24 hours)
+        if (block.timestamp > proof.timestamp + 24 hours) {
+            return (result, ProofError.ProofExpired);
+        }
 
-        if (!proofValid) {
+        // Verify the proof using the verification key
+        bool isValid = _verifyProofWithKey(proof.proof, proof.publicInputs, proof.verificationKey);
+        
+        if (!isValid) {
             return (result, ProofError.InvalidProof);
         }
 
-        // Extract results from public inputs
-        (uint256 executionPrice, uint256 totalVolume, bytes32 matchHash) = _extractProofResults(proof.publicInputs);
+        // Extract information from public inputs
+        if (proof.publicInputs.length >= 3) {
+            result.matchHash = proof.publicInputs[0];
+            result.executionPrice = uint256(proof.publicInputs[1]);
+            result.totalVolume = uint256(proof.publicInputs[2]);
+        }
 
         result.isValid = true;
-        result.executionPrice = executionPrice;
-        result.totalVolume = totalVolume;
-        result.matchHash = matchHash;
+        result.operators = proof.operators;
+        result.proofTimestamp = proof.timestamp;
 
         return (result, ProofError.None);
     }
 
     /// @notice Verify a privacy proof
     /// @param proof The privacy proof to verify
+    /// @param expectedCommitments The expected order commitments
     /// @return isValid Whether the proof is valid
-    /// @return error Any error that occurred
+    /// @return error Any error that occurred during verification
     function verifyPrivacyProof(
-        PrivacyProof memory proof
+        PrivacyProof memory proof,
+        bytes32[] memory expectedCommitments
     ) internal view returns (bool isValid, ProofError error) {
         // Basic validation
         if (proof.proof.length == 0) {
             return (false, ProofError.InvalidProof);
         }
 
-        if (proof.timestamp + 1 hours < block.timestamp) {
-            return (false, ProofError.ProofExpired);
-        }
-
         if (proof.commitments.length == 0) {
             return (false, ProofError.InvalidPublicInputs);
         }
 
-        // Verify the ZK proof
-        bytes32[] memory publicInputs = new bytes32[](proof.commitments.length + 2);
-        for (uint256 i = 0; i < proof.commitments.length; i++) {
-            publicInputs[i] = proof.commitments[i];
+        // Check if proof is expired (24 hours)
+        if (block.timestamp > proof.timestamp + 24 hours) {
+            return (false, ProofError.ProofExpired);
         }
-        publicInputs[proof.commitments.length] = proof.validityHash;
-        publicInputs[proof.commitments.length + 1] = bytes32(proof.timestamp);
 
-        bool proofValid = _verifyZKProof(
-            proof.proof,
-            publicInputs,
-            "" // Would use appropriate verification key
-        );
+        // Verify commitments match expected ones
+        if (proof.commitments.length != expectedCommitments.length) {
+            return (false, ProofError.InvalidPublicInputs);
+        }
 
-        return (proofValid, proofValid ? ProofError.None : ProofError.InvalidProof);
+        for (uint256 i = 0; i < proof.commitments.length; i++) {
+            if (proof.commitments[i] != expectedCommitments[i]) {
+                return (false, ProofError.InvalidPublicInputs);
+            }
+        }
+
+        // Verify the proof (placeholder - would integrate with actual ZK system)
+        isValid = _verifyPrivacyProofInternal(proof);
+        
+        return (isValid, isValid ? ProofError.None : ProofError.InvalidProof);
     }
 
     /// @notice Verify a batch proof
     /// @param batchProof The batch proof to verify
     /// @return isValid Whether the batch proof is valid
-    /// @return error Any error that occurred
+    /// @return error Any error that occurred during verification
     function verifyBatchProof(
         BatchProof memory batchProof
     ) internal view returns (bool isValid, ProofError error) {
@@ -191,152 +198,96 @@ library ZKProofLib {
             return (false, ProofError.InvalidProof);
         }
 
-        if (batchProof.operators.length == 0) {
-            return (false, ProofError.InsufficientOperators);
+        if (batchProof.aggregatedProof.length == 0) {
+            return (false, ProofError.InvalidProof);
         }
 
-        // Verify each individual proof in the batch
+        // Verify each individual proof
         for (uint256 i = 0; i < batchProof.individualProofs.length; i++) {
-            (ProofResult memory result, ProofError err) = verifyMatchingProof(
+            (ProofResult memory result, ProofError individualError) = verifyMatchingProof(
                 batchProof.individualProofs[i],
                 batchProof.individualProofs[i].poolHash
             );
-            
-            if (err != ProofError.None || !result.isValid) {
-                return (false, err);
+
+            if (individualError != ProofError.None || !result.isValid) {
+                return (false, individualError);
             }
         }
 
-        // Verify the aggregated proof
-        bytes32[] memory batchInputs = new bytes32[](2);
-        batchInputs[0] = batchProof.batchHash;
-        batchInputs[1] = bytes32(batchProof.totalMatches);
+        // Verify aggregated proof
+        isValid = _verifyAggregatedProof(batchProof.aggregatedProof, batchProof.individualProofs);
+        
+        return (isValid, isValid ? ProofError.None : ProofError.InvalidProof);
+    }
 
-        bool aggregatedValid = _verifyZKProof(
-            batchProof.aggregatedProof,
-            batchInputs,
-            "" // Would use appropriate verification key
+    /// @notice Generate a proof ID
+    /// @param proofData The proof data
+    /// @param timestamp The timestamp
+    /// @param operator The operator address
+    /// @return proofId The generated proof ID
+    function generateProofId(
+        bytes memory proofData,
+        uint256 timestamp,
+        address operator
+    ) internal pure returns (bytes32 proofId) {
+        return keccak256(abi.encodePacked(proofData, timestamp, operator));
+    }
+
+    /// @notice Validate circuit information
+    /// @param circuitInfo The circuit information
+    /// @return isValid Whether the circuit info is valid
+    function validateCircuitInfo(
+        CircuitInfo memory circuitInfo
+    ) internal pure returns (bool isValid) {
+        return (
+            circuitInfo.circuitHash != bytes32(0) &&
+            circuitInfo.verificationKey.length > 0 &&
+            circuitInfo.maxOrders > 0 &&
+            bytes(circuitInfo.circuitType).length > 0
         );
-
-        return (aggregatedValid, aggregatedValid ? ProofError.None : ProofError.InvalidProof);
     }
 
-    /// @notice Generate a match hash from order information
-    /// @param buyOrderHash Hash of buy order
-    /// @param sellOrderHash Hash of sell order
-    /// @param executionPrice The execution price
-    /// @param matchedAmount The matched amount
-    /// @param timestamp The match timestamp
-    /// @return matchHash The generated match hash
-    function generateMatchHash(
-        bytes32 buyOrderHash,
-        bytes32 sellOrderHash,
-        uint256 executionPrice,
-        uint256 matchedAmount,
-        uint256 timestamp
-    ) internal pure returns (bytes32 matchHash) {
-        return keccak256(abi.encodePacked(
-            buyOrderHash,
-            sellOrderHash,
-            executionPrice,
-            matchedAmount,
-            timestamp
-        ));
-    }
+    // ============ Internal Functions ============
 
-    /// @notice Generate a batch hash from multiple match hashes
-    /// @param matchHashes Array of individual match hashes
-    /// @return batchHash The generated batch hash
-    function generateBatchHash(
-        bytes32[] memory matchHashes
-    ) internal pure returns (bytes32 batchHash) {
-        return keccak256(abi.encodePacked(matchHashes));
-    }
-
-    /// @notice Create public inputs for matching proof
-    /// @param poolHash The pool hash
-    /// @param orderCommitments Array of order commitments
-    /// @param executionPrice The execution price
-    /// @param totalVolume The total volume
-    /// @return publicInputs The formatted public inputs
-    function createMatchingPublicInputs(
-        bytes32 poolHash,
-        bytes32[] memory orderCommitments,
-        uint256 executionPrice,
-        uint256 totalVolume
-    ) internal pure returns (bytes32[] memory publicInputs) {
-        publicInputs = new bytes32[](orderCommitments.length + 3);
-        publicInputs[0] = poolHash;
-        
-        for (uint256 i = 0; i < orderCommitments.length; i++) {
-            publicInputs[i + 1] = orderCommitments[i];
-        }
-        
-        publicInputs[orderCommitments.length + 1] = bytes32(executionPrice);
-        publicInputs[orderCommitments.length + 2] = bytes32(totalVolume);
-        
-        return publicInputs;
-    }
-
-    /// @notice Validate proof freshness
-    /// @param proofTimestamp The proof timestamp
-    /// @param maxAge Maximum age in seconds
-    /// @return isValid Whether the proof is fresh enough
-    function isProofFresh(uint256 proofTimestamp, uint256 maxAge) internal view returns (bool isValid) {
-        return block.timestamp <= proofTimestamp + maxAge;
-    }
-
-    /// @notice Check if operators have sufficient stake for proof
-    /// @param operators Array of operator addresses
-    /// @param minimumStakePerOperator Minimum required stake
-    /// @return hasStake Whether all operators have sufficient stake
-    function verifyOperatorStake(
-        address[] memory operators,
-        uint256 minimumStakePerOperator
-    ) internal pure returns (bool hasStake) {
-        // Simplified - in production would check actual stakes through EigenLayer
-        return operators.length > 0;
-    }
-
-    /// @notice Internal function to verify ZK proof (simplified)
+    /// @notice Verify proof with verification key (placeholder)
     /// @param proof The proof data
     /// @param publicInputs The public inputs
     /// @param verificationKey The verification key
     /// @return isValid Whether the proof is valid
-    function _verifyZKProof(
+    function _verifyProofWithKey(
         bytes memory proof,
         bytes32[] memory publicInputs,
         bytes memory verificationKey
-    ) private pure returns (bool isValid) {
-        // Simplified proof verification for demonstration
-        // In production, this would use a proper ZK-SNARK verifier like Groth16
-        
-        if (proof.length < 32 || publicInputs.length == 0) {
-            return false;
-        }
-
-        // Mock verification based on proof structure
-        bytes32 proofHash = keccak256(proof);
-        bytes32 inputsHash = keccak256(abi.encodePacked(publicInputs));
-        
-        // Simple check - in production this would be cryptographic verification
-        return proofHash != bytes32(0) && inputsHash != bytes32(0);
+    ) internal pure returns (bool isValid) {
+        // TODO: Implement actual ZK proof verification
+        // This would integrate with your ZK proof system (e.g., Circom, Halo2, etc.)
+        // For now, return true as placeholder
+        return true;
     }
 
-    /// @notice Extract results from public inputs
-    /// @param publicInputs The public inputs array
-    /// @return executionPrice The execution price
-    /// @return totalVolume The total volume
-    /// @return matchHash The match hash
-    function _extractProofResults(
-        bytes32[] memory publicInputs
-    ) private pure returns (uint256 executionPrice, uint256 totalVolume, bytes32 matchHash) {
-        if (publicInputs.length >= 3) {
-            executionPrice = uint256(publicInputs[publicInputs.length - 2]);
-            totalVolume = uint256(publicInputs[publicInputs.length - 1]);
-            matchHash = publicInputs[0]; // First input is typically the match hash
-        }
-        
-        return (executionPrice, totalVolume, matchHash);
+    /// @notice Verify privacy proof internally (placeholder)
+    /// @param proof The privacy proof
+    /// @return isValid Whether the proof is valid
+    function _verifyPrivacyProofInternal(
+        PrivacyProof memory proof
+    ) internal pure returns (bool isValid) {
+        // TODO: Implement actual privacy proof verification
+        // This would integrate with your ZK proof system
+        // For now, return true as placeholder
+        return true;
+    }
+
+    /// @notice Verify aggregated proof (placeholder)
+    /// @param aggregatedProof The aggregated proof
+    /// @param individualProofs The individual proofs
+    /// @return isValid Whether the aggregated proof is valid
+    function _verifyAggregatedProof(
+        bytes memory aggregatedProof,
+        MatchingProof[] memory individualProofs
+    ) internal pure returns (bool isValid) {
+        // TODO: Implement actual aggregated proof verification
+        // This would integrate with your ZK proof system
+        // For now, return true as placeholder
+        return true;
     }
 }

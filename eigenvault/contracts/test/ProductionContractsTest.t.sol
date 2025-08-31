@@ -4,7 +4,6 @@ pragma solidity ^0.8.26;
 import "forge-std/Test.sol";
 import "../src/OrderVault.sol";
 import "../src/EigenVaultHook.sol";
-import "../src/EigenVaultBase.sol";
 import "./mocks/MockPoolManager.sol";
 import "./mocks/MockERC20.sol";
 

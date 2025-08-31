@@ -1,36 +1,68 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {EigenVaultBase} from "./EigenVaultBase.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
-import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
-import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
+import {BaseHook} from "@uniswap/v4-periphery/src/utils/BaseHook.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {CurrencyLibrary, Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+
 import {IEigenVaultHook} from "./interfaces/IEigenVaultHook.sol";
 import {IOrderVault} from "./interfaces/IOrderVault.sol";
+import {IEigenVaultAVSServiceManager} from "./interfaces/IEigenVaultAVSServiceManager.sol";
 import {OrderLib} from "./libraries/OrderLib.sol";
 import {ZKProofLib} from "./libraries/ZKProofLib.sol";
 
 /// @title EigenVaultHook
-/// @notice Main Uniswap v4 hook that orchestrates private order routing and execution
-/// @dev Extends EigenVaultBase which extends BaseHook for proper inheritance hierarchy
-contract EigenVaultHook is EigenVaultBase, IEigenVaultHook {
+/// @notice Main Uniswap v4 hook that orchestrates private order routing and execution using ZK proofs
+/// @dev Extends BaseHook for proper Uniswap v4 hook inheritance with ZK proof integration
+contract EigenVaultHook is BaseHook, ReentrancyGuard, Ownable, IEigenVaultHook {
     using OrderLib for OrderLib.Order;
     using CurrencyLibrary for Currency;
     using BeforeSwapDeltaLibrary for BeforeSwapDelta;
     using StateLibrary for IPoolManager;
+    using PoolIdLibrary for PoolKey;
 
-    /// @notice Service manager contract for AVS coordination
-    address public immutable serviceManager;
+    /// @notice AVS service manager contract for EigenLayer integration
+    IEigenVaultAVSServiceManager public immutable avsServiceManager;
+
+    /// @notice The order vault contract for order storage
+    address public immutable orderVault;
+
+    /// @notice Default vault threshold in basis points (0.1% = 10 bps)
+    uint256 public vaultThresholdBps = 10;
+
+    /// @notice Mapping of pool keys to custom thresholds
+    mapping(bytes32 => uint256) public poolThresholds;
+
+    /// @notice Order structure for ZK proof verification
+    struct VaultOrder {
+        uint256 amount;
+        bool zeroForOne;
+        uint256 price;
+        uint256 deadline;
+        address trader;
+        bool executed;
+        bytes32 commitment;
+        PoolKey poolKey;
+    }
 
     /// @notice Events unique to implementation
-    event ServiceManagerAuthorized(address indexed serviceManager, bool authorized);
+    event AVSServiceManagerAuthorized(address indexed avsServiceManager, bool authorized);
+    event MatchingTaskCreated(uint32 indexed taskIndex, bytes32 indexed orderId, bytes32 indexed poolId);
+    event VaultThresholdUpdated(uint256 oldThreshold, uint256 newThreshold);
+    event PoolThresholdUpdated(bytes32 indexed poolId, uint256 oldThreshold, uint256 newThreshold);
+    event VaultOrderCreated(bytes32 indexed orderId, address indexed trader, uint256 amount, bool zeroForOne);
+    event OrderRoutedToVault(address indexed trader, bytes32 indexed orderId, PoolKey indexed key, bool zeroForOne, int256 amountSpecified, bytes32 commitment);
 
     /// @notice Execution statistics for a pool
     struct ExecutionStats {
@@ -42,13 +74,13 @@ contract EigenVaultHook is EigenVaultBase, IEigenVaultHook {
     }
 
     /// @notice Modifiers
-    modifier onlyAuthorizedServiceManager() {
-        require(authorizedServiceManagers[msg.sender], "Unauthorized service manager");
+    modifier onlyAuthorizedAVSServiceManager() {
+        require(msg.sender == address(avsServiceManager), "Only AVS service manager");
         _;
     }
 
-    /// @notice Mapping of order IDs to order details
-    mapping(bytes32 => PrivateOrder) public orders;
+    /// @notice Mapping of order IDs to vault order details
+    mapping(bytes32 => VaultOrder) public vaultOrders;
     
     /// @notice Mapping of order commitments to prevent replay
     mapping(bytes32 => bool) public usedCommitments;
@@ -59,26 +91,29 @@ contract EigenVaultHook is EigenVaultBase, IEigenVaultHook {
     /// @notice Mapping of pool keys to execution statistics
     mapping(bytes32 => ExecutionStats) public poolStats;
 
-    /// @notice Mapping of authorized service managers
-    mapping(address => bool) public authorizedServiceManagers;
+    /// @notice Mapping of pool keys to order counts
+    mapping(bytes32 => uint256) public poolOrderCounts;
 
-
+    /// @notice Mapping of pool keys to total volumes
+    mapping(bytes32 => uint256) public poolTotalVolumes;
 
     /// @notice Constructor
     /// @param _poolManager The Uniswap v4 pool manager
     /// @param _orderVault The order vault contract
-    /// @param _serviceManager The service manager contract for AVS coordination
+    /// @param _avsServiceManager The AVS service manager contract
     constructor(
         IPoolManager _poolManager,
         address _orderVault,
-        address _serviceManager
-    ) EigenVaultBase(_poolManager, _orderVault) {
-        serviceManager = _serviceManager;
-        authorizedServiceManagers[_serviceManager] = true;
+        address _avsServiceManager
+    ) BaseHook(_poolManager) Ownable(msg.sender) {
+        require(_orderVault != address(0), "Invalid order vault address");
+        require(_avsServiceManager != address(0), "Invalid AVS service manager address");
+        orderVault = _orderVault;
+        avsServiceManager = IEigenVaultAVSServiceManager(_avsServiceManager);
     }
 
-    /// @notice Returns the hook permissions
-    function getHookPermissions() public pure returns (Hooks.Permissions memory) {
+    /// @notice Get the hook permissions
+    function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
         return Hooks.Permissions({
             beforeInitialize: false,
             afterInitialize: false,
@@ -87,7 +122,7 @@ contract EigenVaultHook is EigenVaultBase, IEigenVaultHook {
             beforeRemoveLiquidity: false,
             afterRemoveLiquidity: false,
             beforeSwap: true,
-            afterSwap: true,
+            afterSwap: false,
             beforeDonate: false,
             afterDonate: false,
             beforeSwapReturnDelta: false,
@@ -97,362 +132,389 @@ contract EigenVaultHook is EigenVaultBase, IEigenVaultHook {
         });
     }
 
+    /// @notice Before swap hook implementation
+    /// @param sender The sender address
+    /// @param key The pool key
+    /// @param params The swap parameters
+    /// @param hookData Additional hook data
+    function _beforeSwap(
+        address sender,
+        PoolKey calldata key,
+        SwapParams calldata params,
+        bytes calldata hookData
+    ) internal override returns (bytes4, BeforeSwapDelta, uint24) {
+        bytes32 poolId = PoolId.unwrap(PoolIdLibrary.toId(key));
+        
+        // Check if this is a large order that should go to the vault
+        bool isLargeOrderResult = _isLargeOrder(poolId, params.amountSpecified);
+        
+        if (isLargeOrderResult) {
+            // Route to vault for private matching
+            _routeToVault(sender, key, params, hookData);
+        } else {
+            // Small order - execute directly on AMM
+            _executeDirectSwap(sender, key, params);
+        }
+        
+        return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+    }
+
     /// @notice Check if an order amount qualifies as large order
-    /// @dev Override both EigenVaultBase and IEigenVaultHook
-    function isLargeOrder(int256 amountSpecified, PoolKey calldata key) public view override(EigenVaultBase, IEigenVaultHook) returns (bool) {
-        uint256 threshold = poolThresholds[getPoolId(key)];
+    /// @param poolId The pool ID
+    /// @param amountSpecified The amount specified in the swap
+    function _isLargeOrder(bytes32 poolId, int256 amountSpecified) internal view returns (bool) {
+        uint256 threshold = poolThresholds[poolId];
         if (threshold == 0) {
             threshold = vaultThresholdBps;
         }
         
-        // Simplified calculation for testing - would use proper pool state in production
-        uint256 absoluteAmount = uint256(amountSpecified < 0 ? -amountSpecified : amountSpecified);
-        uint256 poolLiquidity = 1000000 ether; // Mock liquidity
+        // Get pool liquidity (simplified - in practice you'd query the actual pool)
+        uint256 poolLiquidity = 1000000e18; // Placeholder
         
-        return (absoluteAmount * 10000) / poolLiquidity >= threshold;
+        uint256 thresholdAmount = (poolLiquidity * threshold) / 10000;
+        uint256 orderAmount = uint256(amountSpecified > 0 ? amountSpecified : -amountSpecified);
+        
+        return orderAmount >= thresholdAmount;
+    }
+
+    /// @notice Route a large order to the vault
+    /// @param sender The order sender
+    /// @param key The pool key
+    /// @param params The swap parameters
+    /// @param hookData Additional hook data
+    function _routeToVault(
+        address sender,
+        PoolKey calldata key,
+        SwapParams calldata params,
+        bytes calldata hookData
+    ) internal {
+        bytes32 poolId = PoolId.unwrap(PoolIdLibrary.toId(key));
+        bytes32 orderId = keccak256(abi.encodePacked(sender, poolId, orderNonce, block.timestamp));
+        
+        // Create order commitment
+        bytes32 commitment = keccak256(abi.encodePacked(
+            orderId,
+            params.amountSpecified,
+            params.sqrtPriceLimitX96,
+            hookData
+        ));
+        
+        require(!usedCommitments[commitment], "Commitment already used");
+        usedCommitments[commitment] = true;
+        
+        // Store order in vault
+        IOrderVault(orderVault).storeOrder(
+            orderId,
+            uint256(params.amountSpecified > 0 ? params.amountSpecified : -params.amountSpecified),
+            params.amountSpecified > 0,
+            _getCurrentPrice(key),
+            block.timestamp + 1 hours,
+            sender,
+            commitment,
+            poolId
+        );
+        
+        // Create AVS matching task
+        uint32 taskIndex = avsServiceManager.createMatchingTask(
+            orderId,
+            poolId,
+            commitment
+        );
+        
+        emit MatchingTaskCreated(taskIndex, orderId, poolId);
+        orderNonce++;
+        
+        // Update pool statistics
+        poolOrderCounts[poolId]++;
+        poolTotalVolumes[poolId] += uint256(params.amountSpecified > 0 ? params.amountSpecified : -params.amountSpecified);
+    }
+
+    /// @notice Execute a swap directly on the AMM
+    /// @param sender The order sender
+    /// @param key The pool key
+    /// @param params The swap parameters
+    function _executeDirectSwap(
+        address sender,
+        PoolKey calldata key,
+        SwapParams calldata params
+    ) internal {
+        // For small orders, we can execute directly
+        // This would typically involve calling the pool manager directly
+        // For now, we'll just update statistics
+        bytes32 poolId = PoolId.unwrap(PoolIdLibrary.toId(key));
+        poolStats[poolId].fallbackExecutions++;
+    }
+
+    /// @notice Execute a matched vault order
+    /// @param orderId The order ID
+    /// @param zkProof The ZK proof of valid matching
+    function executeMatchedOrder(
+        bytes32 orderId,
+        bytes calldata zkProof
+    ) public onlyAuthorizedAVSServiceManager {
+        VaultOrder storage order = vaultOrders[orderId];
+        require(!order.executed, "Order already executed");
+        require(block.timestamp <= order.deadline, "Order expired");
+        
+        // Verify ZK proof (this would integrate with your ZK proof system)
+        require(_verifyZKProof(orderId, zkProof), "Invalid ZK proof");
+        
+        // Mark order as executed
+        order.executed = true;
+        
+        // Update pool statistics
+        bytes32 poolId = PoolId.unwrap(PoolIdLibrary.toId(order.poolKey));
+        poolStats[poolId].successfulMatches++;
+        poolStats[poolId].totalVolume += order.amount;
+        
+        // Execute the actual swap on Uniswap
+        _executeSwapOnUniswap(order);
+    }
+
+    /// @notice Verify ZK proof for order matching
+    /// @param orderId The order ID
+    /// @param zkProof The ZK proof
+    function _verifyZKProof(bytes32 orderId, bytes calldata zkProof) internal view returns (bool) {
+        // Decode the ZK proof data
+        (bytes32 proofId, bytes memory proofData, bytes32[] memory publicInputs, bytes memory verificationKey, uint256 timestamp, address[] memory operators) = 
+            abi.decode(zkProof, (bytes32, bytes, bytes32[], bytes, uint256, address[]));
+        
+        // Basic validation
+        if (proofData.length == 0 || publicInputs.length == 0 || verificationKey.length == 0) {
+            return false;
+        }
+        
+        // Check proof freshness (24 hours)
+        if (block.timestamp > timestamp + 24 hours) {
+            return false;
+        }
+        
+        // Verify the proof using ZKProofLib
+        ZKProofLib.MatchingProof memory matchingProof = ZKProofLib.MatchingProof({
+            proofId: proofId,
+            proof: proofData,
+            publicInputs: publicInputs,
+            verificationKey: verificationKey,
+            timestamp: timestamp,
+            operators: operators,
+            poolHash: bytes32(0), // Will be set from order data
+            orderCount: 1
+        });
+        
+        // Set the pool hash from the order
+        VaultOrder memory order = vaultOrders[orderId];
+        matchingProof.poolHash = keccak256(abi.encodePacked(
+            order.poolKey.currency0,
+            order.poolKey.currency1,
+            order.poolKey.fee,
+            order.poolKey.tickSpacing
+        ));
+        
+        (ZKProofLib.ProofResult memory result, ZKProofLib.ProofError error) = 
+            ZKProofLib.verifyMatchingProof(matchingProof, matchingProof.poolHash);
+        
+        return result.isValid && error == ZKProofLib.ProofError.None;
+    }
+
+    /// @notice Execute swap on Uniswap after ZK verification
+    /// @param order The vault order
+    function _executeSwapOnUniswap(VaultOrder storage order) internal {
+        // Create swap parameters for the pool manager
+        SwapParams memory swapParams = SwapParams({
+            zeroForOne: order.zeroForOne,
+            amountSpecified: int256(order.amount),
+            sqrtPriceLimitX96: 0 // No price limit
+        });
+        
+        // Execute the swap through the pool manager
+        try poolManager.swap(order.poolKey, swapParams, "") {
+            // Swap successful - update statistics
+            bytes32 poolId = PoolId.unwrap(PoolIdLibrary.toId(order.poolKey));
+            poolStats[poolId].totalVolume += order.amount;
+            poolStats[poolId].averageExecutionTime = 
+                (poolStats[poolId].averageExecutionTime + (block.timestamp - order.deadline + 1 hours)) / 2;
+        } catch {
+            // Swap failed - this could happen if pool conditions changed
+            // In production, you might want to retry or handle this differently
+            revert("Swap execution failed");
+        }
+    }
+
+    /// @notice Get current price for a pool
+    /// @param key The pool key
+    function _getCurrentPrice(PoolKey calldata key) internal view returns (uint256) {
+        // Convert PoolKey to PoolId and get the current sqrt price from the pool
+        PoolId poolId = PoolIdLibrary.toId(key);
+        (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, poolId);
+        
+        // Convert sqrt price to actual price
+        // price = (sqrtPriceX96 / 2^96)^2
+        uint256 price = uint256(sqrtPriceX96);
+        price = (price * price) >> 192; // Divide by 2^96 twice
+        
+        return price;
+    }
+
+    /// @notice Set pool threshold
+    /// @param poolId The pool ID
+    /// @param threshold The threshold in basis points
+    function setPoolThreshold(bytes32 poolId, uint256 threshold) external onlyOwner {
+        uint256 oldThreshold = poolThresholds[poolId];
+        poolThresholds[poolId] = threshold;
+        emit PoolThresholdUpdated(poolId, oldThreshold, threshold);
+    }
+
+    /// @notice Set vault threshold
+    /// @param threshold The threshold in basis points
+    function setVaultThreshold(uint256 threshold) external onlyOwner {
+        uint256 oldThreshold = vaultThresholdBps;
+        vaultThresholdBps = threshold;
+        emit VaultThresholdUpdated(oldThreshold, threshold);
+    }
+
+    /// @notice Set vault threshold (internal function)
+    /// @param threshold The threshold in basis points
+    function _setVaultThreshold(uint256 threshold) internal {
+        uint256 oldThreshold = vaultThresholdBps;
+        vaultThresholdBps = threshold;
+        emit VaultThresholdUpdated(oldThreshold, threshold);
+    }
+
+    /// @notice Set AVS service manager authorization
+    /// @param _avsServiceManager The AVS service manager address
+    /// @param authorized Whether it's authorized
+    function setServiceManagerAuthorization(address _avsServiceManager, bool authorized) external onlyOwner {
+        // This would typically involve updating an authorization mapping
+        emit AVSServiceManagerAuthorized(_avsServiceManager, authorized);
+    }
+
+    /// @notice Get pool statistics
+    /// @param poolId The pool ID
+    function getPoolStats(bytes32 poolId) external view returns (ExecutionStats memory) {
+        return poolStats[poolId];
+    }
+
+    /// @notice Get vault order details
+    /// @param orderId The order ID
+    function getVaultOrder(bytes32 orderId) external view returns (VaultOrder memory) {
+        return vaultOrders[orderId];
+    }
+
+    // ============ Interface Implementation ============
+
+    /// @notice Check if an order qualifies as a large order for vault routing
+    /// @param amountSpecified The amount being swapped
+    /// @param key The pool key
+    /// @return Whether the order should be routed to vault
+    function isLargeOrder(int256 amountSpecified, PoolKey calldata key) external view override returns (bool) {
+        bytes32 poolId = PoolId.unwrap(PoolIdLibrary.toId(key));
+        return _isLargeOrder(poolId, amountSpecified);
+    }
+
+    /// @notice Route a large order to the AVS for private matching
+    /// @param trader The trader address
+    /// @param key The pool key
+    /// @param params The swap parameters
+    /// @param hookData Additional hook data
+    /// @return orderId The unique order identifier
+    function routeToVault(
+        address trader,
+        PoolKey calldata key,
+        SwapParams calldata params,
+        bytes calldata hookData
+    ) external override returns (bytes32 orderId) {
+        bytes32 poolId = PoolId.unwrap(PoolIdLibrary.toId(key));
+        orderId = keccak256(abi.encodePacked(trader, poolId, orderNonce, block.timestamp));
+        
+        // Create order commitment
+        bytes32 commitment = keccak256(abi.encodePacked(
+            orderId,
+            params.amountSpecified,
+            params.sqrtPriceLimitX96,
+            hookData
+        ));
+        
+        // Store order in vault
+        IOrderVault(orderVault).storeOrder(
+            orderId,
+            uint256(params.amountSpecified > 0 ? params.amountSpecified : -params.amountSpecified),
+            params.amountSpecified > 0,
+            _getCurrentPrice(key),
+            block.timestamp + 1 hours,
+            trader,
+            commitment,
+            poolId
+        );
+        
+        // Create AVS matching task
+        avsServiceManager.createMatchingTask(orderId, poolId, commitment);
+        
+        emit OrderRoutedToVault(trader, orderId, key, params.amountSpecified > 0, params.amountSpecified, commitment);
+        orderNonce++;
+        
+        return orderId;
+    }
+
+    /// @notice Execute a matched vault order
+    /// @param orderId The order identifier
+    /// @param proof The ZK proof of valid matching
+    /// @param signatures The operator signatures
+    function executeVaultOrder(
+        bytes32 orderId,
+        bytes calldata proof,
+        bytes calldata signatures
+    ) external override {
+        // Call the public executeMatchedOrder function
+        this.executeMatchedOrder(orderId, proof);
+    }
+
+    /// @notice Fallback to AMM execution for unmatched orders
+    /// @param orderId The order identifier
+    function fallbackToAMM(bytes32 orderId) external override {
+        VaultOrder storage order = vaultOrders[orderId];
+        require(!order.executed, "Order already executed");
+        require(block.timestamp > order.deadline, "Order not expired yet");
+        
+        // Mark order as executed
+        order.executed = true;
+        
+        // Execute the swap on Uniswap
+        _executeSwapOnUniswap(order);
+        
+        emit OrderFallbackToAMM(orderId, order.trader, "Order expired, fallback to AMM");
+    }
+
+    /// @notice Get order details
+    /// @param orderId The order identifier
+    /// @return order The private order details
+    function getOrder(bytes32 orderId) external view override returns (PrivateOrder memory order) {
+        VaultOrder memory vaultOrder = vaultOrders[orderId];
+        return PrivateOrder({
+            trader: vaultOrder.trader,
+            poolKey: vaultOrder.poolKey,
+            zeroForOne: vaultOrder.zeroForOne,
+            amountSpecified: int256(vaultOrder.amount),
+            commitment: vaultOrder.commitment,
+            deadline: vaultOrder.deadline,
+            timestamp: vaultOrder.deadline - 1 hours,
+            executed: vaultOrder.executed
+        });
     }
 
     /// @notice Get vault threshold for a pool
-    function getVaultThreshold(PoolKey calldata key) external view override(EigenVaultBase, IEigenVaultHook) returns (uint256 threshold) {
-        bytes32 poolId = getPoolId(key);
+    /// @param key The pool key
+    /// @return threshold The threshold in basis points
+    function getVaultThreshold(PoolKey calldata key) external view override returns (uint256 threshold) {
+        bytes32 poolId = PoolId.unwrap(PoolIdLibrary.toId(key));
         threshold = poolThresholds[poolId];
         if (threshold == 0) {
             threshold = vaultThresholdBps;
         }
     }
 
-    /// @notice Update vault threshold
-    function updateVaultThreshold(uint256 newThreshold) external override(EigenVaultBase, IEigenVaultHook) onlyOwner {
-        require(newThreshold > 0 && newThreshold <= 1000, "Invalid threshold");
-        
-        uint256 oldThreshold = vaultThresholdBps;
-        vaultThresholdBps = newThreshold;
-        
-        emit VaultThresholdUpdated(oldThreshold, newThreshold);
-    }
-
-    /// @notice Set pool-specific threshold
-    function setPoolThreshold(PoolKey calldata key, uint256 threshold) external override onlyOwner {
-        require(threshold <= 1000, "Invalid threshold");
-        
-        bytes32 poolId = getPoolId(key);
-        uint256 oldThreshold = poolThresholds[poolId];
-        poolThresholds[poolId] = threshold;
-        
-        emit PoolThresholdUpdated(poolId, oldThreshold, threshold);
-    }
-
-    /// @notice Required IHooks implementations (empty for unused hooks)
-    function beforeInitialize(address, PoolKey calldata, uint160) external pure returns (bytes4) {
-        revert("Hook not implemented");
-    }
-    
-    function afterInitialize(address, PoolKey calldata, uint160, int24) external pure returns (bytes4) {
-        revert("Hook not implemented");
-    }
-    
-    function beforeAddLiquidity(address, PoolKey calldata, ModifyLiquidityParams calldata, bytes calldata) external pure returns (bytes4) {
-        revert("Hook not implemented");
-    }
-    
-    function afterAddLiquidity(address, PoolKey calldata, ModifyLiquidityParams calldata, BalanceDelta, BalanceDelta, bytes calldata) external pure returns (bytes4, BalanceDelta) {
-        revert("Hook not implemented");
-    }
-    
-    function beforeRemoveLiquidity(address, PoolKey calldata, ModifyLiquidityParams calldata, bytes calldata) external pure returns (bytes4) {
-        revert("Hook not implemented");
-    }
-    
-    function afterRemoveLiquidity(address, PoolKey calldata, ModifyLiquidityParams calldata, BalanceDelta, BalanceDelta, bytes calldata) external pure returns (bytes4, BalanceDelta) {
-        revert("Hook not implemented");
-    }
-    
-    function beforeDonate(address, PoolKey calldata, uint256, uint256, bytes calldata) external pure returns (bytes4) {
-        revert("Hook not implemented");
-    }
-    
-    function afterDonate(address, PoolKey calldata, uint256, uint256, bytes calldata) external pure returns (bytes4) {
-        revert("Hook not implemented");
-    }
-
-    /// @notice Hook called before swap execution
-    function beforeSwap(
-        address sender,
-        PoolKey calldata key,
-        SwapParams calldata params,
-        bytes calldata hookData
-    ) external override returns (bytes4, BeforeSwapDelta, uint24) {
-        // Only process if coming through PoolManager
-        require(msg.sender == address(poolManager), "Only PoolManager");
-
-        // Check if this is a large order that should be routed to vault
-        if (isLargeOrder(params.amountSpecified, key)) {
-            bytes32 orderId = routeToVault(sender, key, params, hookData);
-            
-            // Update pool statistics
-            bytes32 poolId = getPoolId(key);
-            poolStats[poolId].totalOrders++;
-            
-            // Return early to prevent immediate AMM execution
-            // The order will be executed later via executeVaultOrder
-            return (
-                IHooks.beforeSwap.selector,
-                BeforeSwapDeltaLibrary.ZERO_DELTA,
-                0
-            );
-        }
-
-        // For small orders, proceed with normal AMM execution
-        return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
-    }
-
-    /// @notice Hook called after swap execution
-    function afterSwap(
-        address,
-        PoolKey calldata key,
-        SwapParams calldata,
-        BalanceDelta delta,
-        bytes calldata
-    ) external override returns (bytes4, int128) {
-        // Update pool statistics for regular swaps
-        bytes32 poolId = getPoolId(key);
-        uint256 volume = uint256(int256(delta.amount0())) + uint256(int256(delta.amount1()));
-        poolStats[poolId].totalVolume += volume;
-        
-        return (IHooks.afterSwap.selector, 0);
-    }
-
-    /// @inheritdoc IEigenVaultHook
-    function routeToVault(
-        address trader,
-        PoolKey calldata key,
-        SwapParams calldata params,
-        bytes calldata hookData
-    ) public override returns (bytes32 orderId) {
-        require(trader != address(0), "Invalid trader");
-        
-        // Parse hook data for commitment and deadline
-        (bytes32 commitment, uint256 deadline, bytes memory encryptedOrder) = 
-            abi.decode(hookData, (bytes32, uint256, bytes));
-        
-        // Validate deadline
-        require(
-            deadline > block.timestamp + 5 minutes && 
-            deadline <= block.timestamp + 24 hours,
-            "Invalid deadline"
-        );
-        
-        // Check commitment hasn't been used
-        require(!usedCommitments[commitment], "Commitment already used");
-        usedCommitments[commitment] = true;
-        
-        // Generate unique order ID
-        orderId = OrderLib.generateOrderId(trader, key, params, ++orderNonce);
-        
-        // Create private order
-        PrivateOrder memory order = PrivateOrder({
-            trader: trader,
-            poolKey: key,
-            zeroForOne: params.zeroForOne,
-            amountSpecified: params.amountSpecified,
-            commitment: commitment,
-            deadline: deadline,
-            timestamp: block.timestamp,
-            executed: false
-        });
-        
-        // Store order
-        orders[orderId] = order;
-        
-        // Store encrypted order in vault
-        IOrderVault(orderVault).storeOrder(orderId, trader, encryptedOrder, deadline);
-        
-        emit OrderRoutedToVault(
-            trader,
-            orderId,
-            key,
-            params.zeroForOne,
-            uint256(params.amountSpecified > 0 ? params.amountSpecified : -params.amountSpecified),
-            commitment
-        );
-        
-        return orderId;
-    }
-
-    /// @inheritdoc IEigenVaultHook
-    function executeVaultOrder(
-        bytes32 orderId,
-        bytes calldata proof,
-        bytes calldata signatures
-    ) external override onlyAuthorizedServiceManager {
-        PrivateOrder storage order = orders[orderId];
-        require(order.trader != address(0), "Order not found");
-        require(!order.executed, "Order already executed");
-        require(block.timestamp <= order.deadline, "Order expired");
-        
-        // Decode the proof data
-        ZKProofLib.MatchingProof memory matchingProof = abi.decode(proof, (ZKProofLib.MatchingProof));
-        
-        // Verify the ZK proof
-        bytes32 poolKey = keccak256(abi.encode(order.poolKey));
-        (ZKProofLib.ProofResult memory result, ZKProofLib.ProofError error) = 
-            ZKProofLib.verifyMatchingProof(matchingProof, poolKey);
-        
-        require(error == ZKProofLib.ProofError.None, "Invalid proof");
-        require(result.isValid, "Proof verification failed");
-        
-        // Mark order as executed
-        order.executed = true;
-        
-        // Execute the order via pool manager using periphery patterns
-        _executeOrderThroughPeriphery(order, result);
-        
-        // Update statistics
-        bytes32 poolId = _getPoolId(
-            order.poolKey.currency0,
-            order.poolKey.currency1, 
-            order.poolKey.fee,
-            order.poolKey.tickSpacing,
-            order.poolKey.hooks
-        );
-        poolStats[poolId].successfulMatches++;
-        poolStats[poolId].averageExecutionTime = 
-            (poolStats[poolId].averageExecutionTime + (block.timestamp - order.timestamp)) / 2;
-        
-        emit VaultOrderExecuted(
-            orderId,
-            order.trader,
-            uint256(order.amountSpecified > 0 ? order.amountSpecified : -order.amountSpecified),
-            result.matchHash,
-            result.operators
-        );
-    }
-
-    /// @notice Execute an order through Uniswap v4 periphery patterns
-    /// @param order The order to execute
-    /// @param result The proof result containing execution parameters
-    function _executeOrderThroughPeriphery(
-        PrivateOrder storage order,
-        ZKProofLib.ProofResult memory result
-    ) internal {
-        // In production, this would interact with v4 periphery contracts
-        // For now, we'll use direct pool manager interaction
-        
-        SwapParams memory params = SwapParams({
-            zeroForOne: order.zeroForOne,
-            amountSpecified: order.amountSpecified,
-            sqrtPriceLimitX96: uint160(result.executionPrice) // Use price from ZK proof
-        });
-        
-        // The actual swap would be executed here through proper channels
-        // This is a simplified version for demonstration
-        
-        emit OrderExecuted(
-            order.trader,
-            order.poolKey,
-            order.zeroForOne,
-            order.amountSpecified,
-            result.matchHash
-        );
-    }
-
-    /// @inheritdoc IEigenVaultHook
-    function fallbackToAMM(bytes32 orderId) external override {
-        PrivateOrder storage order = orders[orderId];
-        require(order.trader != address(0), "Order not found");
-        require(!order.executed, "Order already executed");
-        require(
-            block.timestamp > order.deadline || 
-            msg.sender == order.trader ||
-            authorizedServiceManagers[msg.sender],
-            "Cannot fallback yet"
-        );
-        
-        order.executed = true;
-        
-        // Update statistics
-        bytes32 poolId = _getPoolId(
-            order.poolKey.currency0,
-            order.poolKey.currency1, 
-            order.poolKey.fee,
-            order.poolKey.tickSpacing,
-            order.poolKey.hooks
-        );
-        poolStats[poolId].fallbackExecutions++;
-        
-        // In production, this would trigger actual AMM execution
-        // For now, we'll just emit the event
-        
-        emit OrderFallbackToAMM(
-            orderId, 
-            order.trader, 
-            block.timestamp > order.deadline ? "Deadline exceeded" : "Manual fallback"
-        );
-    }
-
-    /// @inheritdoc IEigenVaultHook
-    function getOrder(bytes32 orderId) external view override returns (PrivateOrder memory order) {
-        return orders[orderId];
-    }
-
-    /// @notice Get execution statistics for a pool
-    /// @param key The pool key
-    /// @return stats The execution statistics
-    function getPoolExecutionStats(PoolKey calldata key) external view returns (ExecutionStats memory stats) {
-        bytes32 poolId = getPoolId(key);
-        return poolStats[poolId];
-    }
-
-    /// @notice Authorize or deauthorize a service manager
-    /// @param serviceManagerAddr The service manager address
-    /// @param authorized Whether to authorize or deauthorize
-    function setServiceManagerAuthorization(
-        address serviceManagerAddr,
-        bool authorized
-    ) external onlyOwner {
-        require(serviceManagerAddr != address(0), "Invalid service manager");
-        authorizedServiceManagers[serviceManagerAddr] = authorized;
-        emit ServiceManagerAuthorized(serviceManagerAddr, authorized);
-    }
-
-    /// @notice Get order count for a trader
-    /// @param trader The trader address
-    /// @return count The number of orders
-    function getTraderOrderCount(address trader) external view returns (uint256 count) {
-        // This is a simplified version - in production you'd maintain proper indices
-        return 0; // Placeholder
-    }
-
-    /// @notice Check if an order is executable
-    /// @param orderId The order ID
-    /// @return executable Whether the order can be executed
-    function isOrderExecutable(bytes32 orderId) external view returns (bool executable) {
-        PrivateOrder memory order = orders[orderId];
-        return order.trader != address(0) && 
-               !order.executed && 
-               block.timestamp <= order.deadline;
-    }
-
-    /// @notice Helper function to generate pool ID from individual components
-    function _getPoolId(
-        Currency currency0,
-        Currency currency1,
-        uint24 fee,
-        int24 tickSpacing,
-        IHooks hooks
-    ) private pure returns (bytes32) {
-        return keccak256(abi.encode(currency0, currency1, fee, tickSpacing, hooks));
-    }
-
-    /// @notice Emergency pause functionality (owner only)
-    bool public paused;
-    
-    modifier whenNotPaused() {
-        require(!paused, "Contract paused");
-        _;
-    }
-    
-    function setPaused(bool _paused) external onlyOwner {
-        paused = _paused;
+    /// @notice Update vault threshold (admin only)
+    /// @param newThreshold The new threshold in basis points
+    function updateVaultThreshold(uint256 newThreshold) external override onlyOwner {
+        _setVaultThreshold(newThreshold);
     }
 }

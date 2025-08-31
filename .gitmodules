@@ -1,0 +1,6 @@
+[submodule "eigenvault/lib/cofhe-contracts"]
+	path = eigenvault/lib/cofhe-contracts
+	url = https://github.com/fhenixprotocol/cofhe-contracts
+[submodule "eigenvault/lib/cofhe-foundry-mocks"]
+	path = eigenvault/lib/cofhe-foundry-mocks
+	url = https://github.com/fhenixprotocol/cofhe-foundry-mocks

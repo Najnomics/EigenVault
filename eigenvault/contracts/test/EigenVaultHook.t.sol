@@ -129,7 +129,7 @@ contract EigenVaultHookTest is EigenVaultTestBase {
         uint256 oldThreshold = hook.vaultThresholdBps();
         
         vm.expectEmit(true, false, false, true);
-        emit EigenVaultBase.VaultThresholdUpdated(oldThreshold, newThreshold);
+        emit EigenVaultHook.VaultThresholdUpdated(oldThreshold, newThreshold);
         
         hook.updateVaultThreshold(newThreshold);
         assertEq(hook.vaultThresholdBps(), newThreshold);
@@ -156,7 +156,7 @@ contract EigenVaultHookTest is EigenVaultTestBase {
         uint256 poolThreshold = 300;
         
         vm.expectEmit(true, false, false, true);
-        emit EigenVaultBase.PoolThresholdUpdated(hook.getPoolId(testPoolKey), 0, poolThreshold);
+        emit EigenVaultHook.PoolThresholdUpdated(hook.getPoolId(testPoolKey), 0, poolThreshold);
         
         hook.setPoolThreshold(testPoolKey, poolThreshold);
         assertEq(hook.getVaultThreshold(testPoolKey), poolThreshold);
@@ -449,10 +449,10 @@ contract EigenVaultHookTest is EigenVaultTestBase {
         address newServiceManager = address(0x999);
         
         vm.expectEmit(true, false, false, true);
-        emit EigenVaultHook.ServiceManagerAuthorized(newServiceManager, true);
+        emit EigenVaultHook.AVSServiceManagerAuthorized(newServiceManager, true);
         
         hook.setServiceManagerAuthorization(newServiceManager, true);
-        assertTrue(hook.authorizedServiceManagers(newServiceManager));
+        assertTrue(hook.authorizedAVSServiceManagers(newServiceManager));
         
         // Test deauthorization
         hook.setServiceManagerAuthorization(newServiceManager, false);
@@ -528,7 +528,7 @@ contract EigenVaultHookTest is EigenVaultTestBase {
         address newOwner = address(0x999);
         
         vm.expectEmit(true, true, false, false);
-        emit EigenVaultBase.OwnershipTransferred(address(this), newOwner);
+        emit EigenVaultHook.OwnershipTransferred(address(this), newOwner);
         
         hook.transferOwnership(newOwner);
         assertEq(hook.owner(), newOwner);
