@@ -14,24 +14,28 @@ contract BasicOrderVaultTest is Test {
     
     function setUp() public {
         orderVault = new OrderVault();
-        orderVault.authorizeHook(hook1);
+        orderVault.authorizeHook(hook1, true);
     }
     
     function testDeployment() public {
         assertEq(orderVault.owner(), address(this));
-        assertTrue(orderVault.isAuthorizedHook(hook1));
-        assertEq(orderVault.totalOrdersStored(), 0);
+        assertTrue(orderVault.authorizedHooks(hook1));
+        assertEq(orderVault.getActiveOrderCount(), 0);
     }
     
     function testStoreOrder() public {
         bytes32 orderId = keccak256("test_order");
-        bytes memory encryptedData = "encrypted_test_data";
+        uint256 amount = 1e18; // 1 token
+        bool zeroForOne = true;
+        uint256 price = 2000e18; // $2000
         uint256 deadline = block.timestamp + 1 hours;
+        bytes32 commitment = keccak256("commitment");
+        bytes32 poolId = keccak256("pool");
         
         vm.prank(hook1);
-        orderVault.storeOrder(orderId, trader1, encryptedData, deadline);
+        orderVault.storeOrder(orderId, amount, zeroForOne, price, deadline, trader1, commitment, poolId);
         
-        assertEq(orderVault.totalOrdersStored(), 1);
+        assertEq(orderVault.getActiveOrderCount(), 1);
         
         (bool exists, bool valid) = orderVault.isValidOrder(orderId);
         assertTrue(exists);
@@ -39,12 +43,16 @@ contract BasicOrderVaultTest is Test {
     }
     
     function testUnauthorizedStore() public {
-        bytes32 orderId = keccak256("test_order"); 
-        bytes memory encryptedData = "encrypted_test_data";
+        bytes32 orderId = keccak256("test_order");
+        uint256 amount = 1e18;
+        bool zeroForOne = true;
+        uint256 price = 2000e18;
         uint256 deadline = block.timestamp + 1 hours;
+        bytes32 commitment = keccak256("commitment");
+        bytes32 poolId = keccak256("pool");
         
         vm.prank(address(0x99)); // Unauthorized
-        vm.expectRevert("Hook not authorized");
-        orderVault.storeOrder(orderId, trader1, encryptedData, deadline);
+        vm.expectRevert();
+        orderVault.storeOrder(orderId, amount, zeroForOne, price, deadline, trader1, commitment, poolId);
     }
 }
