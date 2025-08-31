@@ -21,6 +21,9 @@ import {IOrderVault} from "./interfaces/IOrderVault.sol";
 import {IEigenVaultAVSServiceManager} from "./interfaces/IEigenVaultAVSServiceManager.sol";
 import {OrderLib} from "./libraries/OrderLib.sol";
 import {ZKProofLib} from "./libraries/ZKProofLib.sol";
+import {OrderMatchingLib} from "./libraries/OrderMatchingLib.sol";
+import {AVSConsensusLib} from "./libraries/AVSConsensusLib.sol";
+import {SecurityLib} from "./libraries/SecurityLib.sol";
 
 /// @title EigenVaultHook
 /// @notice Main Uniswap v4 hook that orchestrates private order routing and execution using ZK proofs
@@ -66,6 +69,15 @@ contract EigenVaultHook is BaseHook, ReentrancyGuard, Ownable, IEigenVaultHook {
     event VaultOrderExecuted(PoolKey indexed poolKey, uint256 amountIn, uint256 expectedAmountOut, uint256 actualAmount0, uint256 actualAmount1, bool zeroForOne);
     event OrderMatched(bytes32 indexed orderId, address indexed trader, uint256 executionPrice, uint256 matchedAmount);
     event LiquidityChecked(bytes32 indexed poolId, uint256 requiredAmount, uint256 availableLiquidity, bool sufficient);
+    event MatchExecuted(bytes32 indexed matchId, uint256 executionPrice, uint256 matchedAmount);
+    event ConsensusTaskCreated(bytes32 indexed taskId, bytes32 indexed matchId, uint256 threshold);
+    event OrderAddedToBook(bytes32 indexed orderId, bytes32 indexed poolId, uint256 price, uint256 amount, bool isBuy);
+    event SecurityCheckFailed(bytes32 indexed orderId, uint256 riskScore, string reason);
+    event EmergencyPauseActivated(string reason, uint256 timestamp);
+    event EmergencyPauseDeactivated(uint256 timestamp);
+    event GasOptimizationUpdated(bool batchProcessing, uint256 maxBatchSize, bool compression);
+    event SecurityConfigUpdated(uint256 maxOrderSize, uint256 maxPoolExposure, uint256 maxSlippageBps);
+    event BatchProcessCompleted(uint256 totalOrders, uint256 successCount);
 
     /// @notice Execution statistics for a pool
     struct ExecutionStats {
@@ -100,6 +112,45 @@ contract EigenVaultHook is BaseHook, ReentrancyGuard, Ownable, IEigenVaultHook {
     /// @notice Mapping of pool keys to total volumes
     mapping(bytes32 => uint256) public poolTotalVolumes;
 
+    /// @notice Mapping of pool keys to order books
+    mapping(bytes32 => OrderMatchingLib.OrderBook) public orderBooks;
+    
+    /// @notice Mapping of match IDs to matching results
+    mapping(bytes32 => OrderMatchingLib.MatchingResult) public matches;
+    
+    /// @notice Mapping of consensus task IDs to consensus tasks
+    mapping(bytes32 => AVSConsensusLib.ConsensusTask) public consensusTasks;
+    
+    /// @notice Consensus configuration
+    AVSConsensusLib.ConsensusConfig public consensusConfig;
+    
+    /// @notice Order matching statistics
+    struct MatchingStats {
+        uint256 totalMatches;
+        uint256 successfulMatches;
+        uint256 failedMatches;
+        uint256 totalVolume;
+        uint256 averageMatchTime;
+        uint256 consensusSuccessRate;
+    }
+    
+    /// @notice Global matching statistics
+    MatchingStats public matchingStats;
+    
+    /// @notice Security configuration for production hardening
+    SecurityLib.SecurityConfig public securityConfig;
+    
+    /// @notice Gas optimization settings
+    struct GasOptimization {
+        bool enableBatchProcessing;
+        uint256 maxBatchSize;
+        bool enableCompression;
+        uint256 gasPriceLimit;
+    }
+    
+    /// @notice Gas optimization configuration
+    GasOptimization public gasOptimization;
+
     /// @notice Constructor
     /// @param _poolManager The Uniswap v4 pool manager
     /// @param _orderVault The order vault contract
@@ -113,6 +164,34 @@ contract EigenVaultHook is BaseHook, ReentrancyGuard, Ownable, IEigenVaultHook {
         require(_avsServiceManager != address(0), "Invalid AVS service manager address");
         orderVault = _orderVault;
         avsServiceManager = IEigenVaultAVSServiceManager(_avsServiceManager);
+        
+        // Initialize consensus configuration
+        consensusConfig = AVSConsensusLib.ConsensusConfig({
+            minOperators: 3,
+            consensusThreshold: 2,
+            responseTimeout: 5 minutes,
+            maxRetries: 3,
+            requireSignature: true
+        });
+        
+        // Initialize security configuration
+        securityConfig = SecurityLib.SecurityConfig({
+            maxOrderSize: 10000e18,        // 10,000 tokens max
+            maxPoolExposure: 100000e18,    // 100,000 tokens max
+            maxSlippageBps: 500,           // 5% max slippage
+            emergencyPauseThreshold: 80,   // 80% risk threshold
+            emergencyPaused: false,
+            lastSecurityCheck: 0,
+            securityCheckInterval: 1 hours
+        });
+        
+        // Initialize gas optimization
+        gasOptimization = GasOptimization({
+            enableBatchProcessing: true,
+            maxBatchSize: 10,
+            enableCompression: true,
+            gasPriceLimit: 100 gwei
+        });
     }
 
     /// @notice Get the hook permissions
@@ -717,6 +796,19 @@ contract EigenVaultHook is BaseHook, ReentrancyGuard, Ownable, IEigenVaultHook {
         require(!order.executed, "Order already executed");
         require(block.timestamp <= order.deadline, "Order expired");
         
+        // Perform security check before execution
+        SecurityLib.RiskAssessment memory riskAssessment = SecurityLib.performSecurityCheck(
+            securityConfig,
+            order.amount,
+            poolStats[PoolId.unwrap(PoolIdLibrary.toId(order.poolKey))].totalVolume,
+            100 // Default slippage
+        );
+        
+        if (!riskAssessment.shouldExecute) {
+            emit SecurityCheckFailed(orderId, riskAssessment.riskScore, riskAssessment.riskReason);
+            return false;
+        }
+        
         // Verify ZK proof
         (ZKProofLib.ProofResult memory result, ZKProofLib.ProofError error) = 
             ZKProofLib.verifyMatchingProof(matchingProof, matchingProof.poolHash);
@@ -734,7 +826,7 @@ contract EigenVaultHook is BaseHook, ReentrancyGuard, Ownable, IEigenVaultHook {
         );
         
         emit LiquidityChecked(
-            PoolId.unwrap(PoolIdLibrary.toId(order.poolKey)),
+            PoolId.unwrap(PoolIdLibrary.toId(poolKey)),
             order.amount,
             availableLiquidity,
             hasLiquidity
@@ -742,7 +834,7 @@ contract EigenVaultHook is BaseHook, ReentrancyGuard, Ownable, IEigenVaultHook {
         
         if (!hasLiquidity) {
             // Insufficient liquidity - mark for fallback
-            poolStats[PoolId.unwrap(PoolIdLibrary.toId(order.poolKey))].fallbackExecutions++;
+            poolStats[PoolId.unwrap(PoolIdLibrary.toId(poolKey))].fallbackExecutions++;
             return false;
         }
         
@@ -753,7 +845,7 @@ contract EigenVaultHook is BaseHook, ReentrancyGuard, Ownable, IEigenVaultHook {
         order.executed = true;
         
         // Update pool statistics
-        bytes32 poolId = PoolId.unwrap(PoolIdLibrary.toId(order.poolKey));
+        bytes32 poolId = PoolId.unwrap(PoolIdLibrary.toId(poolKey));
         poolStats[poolId].totalOrders++;
         poolStats[poolId].successfulMatches++;
         
@@ -774,7 +866,7 @@ contract EigenVaultHook is BaseHook, ReentrancyGuard, Ownable, IEigenVaultHook {
     /// @return liquidityInfo Liquidity distribution information
     /// @return feeInfo Fee and protocol information
     /// @return volumeInfo Volume and execution statistics
-    function _getPoolAnalytics(PoolKey calldata key) internal view returns (
+    function _getPoolAnalytics(PoolKey memory key) internal view returns (
         PoolState memory poolState,
         LiquidityInfo memory liquidityInfo,
         FeeInfo memory feeInfo,
@@ -919,5 +1011,340 @@ contract EigenVaultHook is BaseHook, ReentrancyGuard, Ownable, IEigenVaultHook {
         uint256 successfulMatches;
         uint256 fallbackExecutions;
         uint256 averageExecutionTime;
+    }
+
+    /// @notice Add order to order book for matching
+    /// @param orderId The order ID
+    /// @param poolKey The pool key
+    /// @param price The order price
+    /// @param amount The order amount
+    /// @param zeroForOne Whether swapping token0 for token1
+    function addOrderToBook(
+        bytes32 orderId,
+        PoolKey memory poolKey,
+        uint256 price,
+        uint256 amount,
+        bool zeroForOne
+    ) internal {
+        bytes32 poolId = PoolId.unwrap(PoolIdLibrary.toId(poolKey));
+        
+        OrderMatchingLib.OrderBookEntry memory orderEntry = OrderMatchingLib.OrderBookEntry({
+            orderId: orderId,
+            price: price,
+            amount: amount,
+            timestamp: block.timestamp,
+            trader: msg.sender,
+            isActive: true
+        });
+        
+        OrderMatchingLib.insertOrder(orderBooks[poolId], orderEntry, !zeroForOne);
+        
+        // Try to match orders immediately
+        _attemptOrderMatching(poolId);
+    }
+
+    /// @notice Attempt to match orders in the order book
+    /// @param poolId The pool ID
+    function _attemptOrderMatching(bytes32 poolId) internal {
+        OrderMatchingLib.OrderBook storage orderBook = orderBooks[poolId];
+        
+        // Check if there are orders to match
+        if (orderBook.buyOrders.length == 0 || orderBook.sellOrders.length == 0) {
+            return;
+        }
+        
+        // Get best bid and ask
+        (uint256 bestBid, uint256 bestAsk) = OrderMatchingLib.getBestPrices(orderBook);
+        
+        // Check if orders can cross
+        if (bestBid < bestAsk) {
+            return;
+        }
+        
+        // Match orders at the crossing price
+        OrderMatchingLib.OrderBookEntry memory buyOrder = orderBook.buyOrders[0];
+        OrderMatchingLib.OrderBookEntry memory sellOrder = orderBook.sellOrders[0];
+        
+        // Create a local copy of pool key for matching
+        PoolKey memory localPoolKey = _getPoolKeyFromId(poolId);
+        
+        (OrderMatchingLib.MatchingResult memory result, bool canMatch) = 
+            OrderMatchingLib.matchOrders(buyOrder, sellOrder, localPoolKey);
+        
+        if (canMatch) {
+            // Store the match
+            matches[result.matchId] = result;
+            
+            // Create consensus task for AVS validation
+            _createConsensusTask(result);
+            
+            // Update statistics
+            matchingStats.totalMatches++;
+            matchingStats.totalVolume += result.matchedAmount;
+            
+            // Remove matched orders from book
+            OrderMatchingLib.removeOrder(orderBook, buyOrder.orderId, true);
+            OrderMatchingLib.removeOrder(orderBook, sellOrder.orderId, false);
+            
+            emit OrderMatched(
+                result.matchId,
+                buyOrder.trader,
+                result.executionPrice,
+                result.matchedAmount
+            );
+        }
+    }
+
+    /// @notice Create consensus task for AVS validation
+    /// @param result The matching result
+    function _createConsensusTask(OrderMatchingLib.MatchingResult memory result) internal {
+        // Get assigned operators from AVS service manager
+        address[] memory operators = avsServiceManager.getAssignedOperators(result.matchId);
+        
+        // Create consensus configuration
+        AVSConsensusLib.ConsensusConfig memory config = AVSConsensusLib.ConsensusConfig({
+            minOperators: 3,
+            consensusThreshold: AVSConsensusLib.calculateConsensusThreshold(operators.length),
+            responseTimeout: 5 minutes,
+            maxRetries: 3,
+            requireSignature: true
+        });
+        
+        // Create consensus task
+        bytes32 taskId = AVSConsensusLib.createConsensusTask(
+            result.matchId,
+            operators,
+            config
+        );
+        
+        // Initialize consensus task storage
+        consensusTasks[taskId].taskId = taskId;
+        consensusTasks[taskId].matchId = result.matchId;
+        consensusTasks[taskId].consensusThreshold = config.consensusThreshold;
+        consensusTasks[taskId].deadline = block.timestamp + config.responseTimeout;
+        consensusTasks[taskId].completed = false;
+        consensusTasks[taskId].responseCount = 0;
+        
+        // Assign operators
+        consensusTasks[taskId].assignedOperators = operators;
+        
+        // Request operator responses
+        avsServiceManager.requestConsensus(taskId, result.consensusHash);
+    }
+
+    /// @notice Submit operator consensus response
+    /// @param taskId The consensus task ID
+    /// @param responseHash The response hash
+    /// @param signature The operator signature
+    function submitConsensusResponse(
+        bytes32 taskId,
+        bytes32 responseHash,
+        bytes memory signature
+    ) external {
+        AVSConsensusLib.ConsensusTask storage task = consensusTasks[taskId];
+        require(task.taskId != bytes32(0), "Task not found");
+        require(!task.completed, "Task already completed");
+        
+        // Submit response
+        bool success = AVSConsensusLib.submitOperatorResponse(
+            task,
+            msg.sender,
+            responseHash,
+            signature
+        );
+        
+        require(success, "Failed to submit response");
+        
+        // Check if consensus reached
+        if (task.completed) {
+            _executeConsensusMatch(task.matchId);
+        }
+    }
+
+    /// @notice Execute match after consensus is reached
+    /// @param matchId The match ID
+    function _executeConsensusMatch(bytes32 matchId) internal {
+        OrderMatchingLib.MatchingResult storage result = matches[matchId];
+        require(result.matchId != bytes32(0), "Match not found");
+        require(!result.executed, "Match already executed");
+        
+        // Mark match as executed
+        result.executed = true;
+        
+        // Update statistics
+        matchingStats.successfulMatches++;
+        
+        // Execute the actual swap
+        _executeMatchedSwap(result);
+        
+        emit MatchExecuted(matchId, result.executionPrice, result.matchedAmount);
+    }
+
+    /// @notice Execute the actual swap for a matched order
+    /// @param result The matching result
+    function _executeMatchedSwap(OrderMatchingLib.MatchingResult memory result) internal {
+        // Get order details
+        VaultOrder storage buyOrder = vaultOrders[result.buyOrderId];
+        VaultOrder storage sellOrder = vaultOrders[result.sellOrderId];
+        
+        // Execute swaps for both orders
+        _executeSwapOnUniswap(buyOrder);
+        _executeSwapOnUniswap(sellOrder);
+        
+        // Update pool statistics
+        bytes32 poolId = PoolId.unwrap(PoolIdLibrary.toId(buyOrder.poolKey));
+        poolStats[poolId].successfulMatches += 2;
+        poolStats[poolId].totalVolume += result.matchedAmount * 2;
+    }
+
+    /// @notice Get pool key from pool ID (helper function)
+    /// @param poolId The pool ID
+    /// @return poolKey The pool key
+    function _getPoolKeyFromId(bytes32 poolId) internal view returns (PoolKey memory poolKey) {
+        // This would need to be implemented based on your pool registry
+        // For now, return a placeholder
+        revert("Pool key lookup not implemented");
+    }
+
+    /// @notice Get order book for a pool
+    /// @param poolId The pool ID
+    /// @return buyOrders Array of buy orders
+    /// @return sellOrders Array of sell orders
+    /// @return totalBuyVolume Total buy volume
+    /// @return totalSellVolume Total sell volume
+    function getOrderBook(bytes32 poolId) external view returns (
+        OrderMatchingLib.OrderBookEntry[] memory buyOrders,
+        OrderMatchingLib.OrderBookEntry[] memory sellOrders,
+        uint256 totalBuyVolume,
+        uint256 totalSellVolume
+    ) {
+        OrderMatchingLib.OrderBook storage orderBook = orderBooks[poolId];
+        return (
+            orderBook.buyOrders,
+            orderBook.sellOrders,
+            orderBook.totalBuyVolume,
+            orderBook.totalSellVolume
+        );
+    }
+
+    /// @notice Get matching statistics
+    /// @return stats The matching statistics
+    function getMatchingStats() external view returns (MatchingStats memory) {
+        return matchingStats;
+    }
+
+    /// @notice Get consensus task details
+    /// @param taskId The task ID
+    /// @return matchId The match ID
+    /// @return consensusThreshold The consensus threshold
+    /// @return deadline The task deadline
+    /// @return completed Whether the task is completed
+    /// @return assignedOperators Array of assigned operators
+    /// @return responseCount Number of responses received
+    function getConsensusTask(bytes32 taskId) external view returns (
+        bytes32 matchId,
+        uint256 consensusThreshold,
+        uint256 deadline,
+        bool completed,
+        address[] memory assignedOperators,
+        uint256 responseCount
+    ) {
+        AVSConsensusLib.ConsensusTask storage task = consensusTasks[taskId];
+        return (
+            task.matchId,
+            task.consensusThreshold,
+            task.deadline,
+            task.completed,
+            task.assignedOperators,
+            task.responseCount
+        );
+    }
+
+    /// @notice Emergency pause activation (owner only)
+    /// @param reason Reason for emergency pause
+    function activateEmergencyPause(string memory reason) external onlyOwner {
+        SecurityLib.activateEmergencyPause(securityConfig, reason);
+    }
+
+    /// @notice Emergency pause deactivation (owner only)
+    function deactivateEmergencyPause() external onlyOwner {
+        SecurityLib.deactivateEmergencyPause(securityConfig);
+    }
+
+    /// @notice Update security configuration (owner only)
+    /// @param maxOrderSize Maximum order size
+    /// @param maxPoolExposure Maximum pool exposure
+    /// @param maxSlippageBps Maximum slippage in basis points
+    function updateSecurityConfig(
+        uint256 maxOrderSize,
+        uint256 maxPoolExposure,
+        uint256 maxSlippageBps
+    ) external onlyOwner {
+        securityConfig.maxOrderSize = maxOrderSize;
+        securityConfig.maxPoolExposure = maxPoolExposure;
+        securityConfig.maxSlippageBps = maxSlippageBps;
+        
+        emit SecurityConfigUpdated(maxOrderSize, maxPoolExposure, maxSlippageBps);
+    }
+
+    /// @notice Update gas optimization settings (owner only)
+    /// @param enableBatch Whether to enable batch processing
+    /// @param maxBatchSize Maximum batch size
+    /// @param enableCompression Whether to enable compression
+    function updateGasOptimization(
+        bool enableBatch,
+        uint256 maxBatchSize,
+        bool enableCompression
+    ) external onlyOwner {
+        gasOptimization.enableBatchProcessing = enableBatch;
+        gasOptimization.maxBatchSize = maxBatchSize;
+        gasOptimization.enableCompression = enableCompression;
+        
+        emit GasOptimizationUpdated(enableBatch, maxBatchSize, enableCompression);
+    }
+
+    /// @notice Get security status
+    /// @return isPaused Whether emergency pause is active
+    /// @return lastCheck Last security check timestamp
+    /// @return checkInterval Security check interval
+    /// @return needsCheck Whether security check is needed
+    function getSecurityStatus() external view returns (
+        bool isPaused,
+        uint256 lastCheck,
+        uint256 checkInterval,
+        bool needsCheck
+    ) {
+        (isPaused, lastCheck, checkInterval, needsCheck) = SecurityLib.getSecurityStatus(securityConfig);
+    }
+
+    /// @notice Batch process multiple orders for gas efficiency
+    /// @param orderIds Array of order IDs to process
+    /// @return successCount Number of successfully processed orders
+    function batchProcessOrders(bytes32[] memory orderIds) external returns (uint256 successCount) {
+        require(gasOptimization.enableBatchProcessing, "Batch processing disabled");
+        require(orderIds.length <= gasOptimization.maxBatchSize, "Batch size too large");
+        
+        successCount = 0;
+        for (uint256 i = 0; i < orderIds.length; i++) {
+            if (_processOrder(orderIds[i])) {
+                successCount++;
+            }
+        }
+        
+        emit BatchProcessCompleted(orderIds.length, successCount);
+    }
+
+    /// @notice Internal order processing function
+    /// @param orderId The order ID to process
+    /// @return success Whether the order was processed successfully
+    function _processOrder(bytes32 orderId) internal returns (bool success) {
+        // Basic order validation and processing
+        VaultOrder storage order = vaultOrders[orderId];
+        if (order.executed || block.timestamp > order.deadline) {
+            return false;
+        }
+        
+        // Simple processing logic - in production this would be more sophisticated
+        return true;
     }
 }

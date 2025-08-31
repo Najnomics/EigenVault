@@ -299,6 +299,30 @@ contract EigenVaultAVSServiceManager is ReentrancyGuard, Ownable, IEigenVaultAVS
         return registeredOperatorAddresses;
     }
 
+    /// @notice Get assigned operators for a specific task
+    /// @param matchId The match ID
+    /// @return operators Array of assigned operator addresses
+    function getAssignedOperators(bytes32 matchId) external view override returns (address[] memory operators) {
+        // For now, return a default set of operators
+        // In production, this would query the actual AVS registry
+        operators = new address[](3);
+        operators[0] = address(0x1);
+        operators[1] = address(0x2);
+        operators[2] = address(0x3);
+        return operators;
+    }
+
+    /// @notice Request consensus from operators
+    /// @param taskId The consensus task ID
+    /// @param consensusHash The consensus hash to validate
+    function requestConsensus(bytes32 taskId, bytes32 consensusHash) external override {
+        // Emit event for operator notification
+        emit ConsensusRequested(taskId, consensusHash, block.timestamp);
+        
+        // In production, this would trigger operator notifications
+        // For now, just log the request
+    }
+
     // ============ Challenge Functions ============
 
     /// @notice Challenge a task response
@@ -343,4 +367,5 @@ contract EigenVaultAVSServiceManager is ReentrancyGuard, Ownable, IEigenVaultAVS
     event QuorumReached(uint32 indexed taskIndex, uint256 responseCount);
     event EmergencyPaused(address indexed pauser);
     event EmergencyUnpaused(address indexed unpauser);
+    event ConsensusRequested(bytes32 indexed taskId, bytes32 indexed consensusHash, uint256 timestamp);
 } 

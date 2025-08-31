@@ -90,4 +90,14 @@ interface IEigenVaultAVSServiceManager {
     /// @param operator The operator address
     /// @return response The task response
     function getTaskResponse(uint32 taskIndex, address operator) external view returns (TaskResponse memory response);
+
+    /// @notice Get assigned operators for a specific task
+    /// @param matchId The match ID
+    /// @return operators Array of assigned operator addresses
+    function getAssignedOperators(bytes32 matchId) external view returns (address[] memory operators);
+
+    /// @notice Request consensus from operators
+    /// @param taskId The consensus task ID
+    /// @param consensusHash The consensus hash to validate
+    function requestConsensus(bytes32 taskId, bytes32 consensusHash) external;
 } 
