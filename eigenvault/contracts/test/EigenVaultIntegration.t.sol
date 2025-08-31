@@ -52,7 +52,7 @@ contract EigenVaultIntegrationTest is Test {
         );
 
         // Configure contracts
-        orderVault.authorizeHook(address(eigenVaultHook));
+        orderVault.authorizeHook(address(eigenVaultHook), true);
         orderVault.authorizeOperator(operator);
         orderVault.authorizeOperator(operator2);
 
