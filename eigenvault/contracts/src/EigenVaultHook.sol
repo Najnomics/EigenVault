@@ -63,6 +63,9 @@ contract EigenVaultHook is BaseHook, ReentrancyGuard, Ownable, IEigenVaultHook {
     event PoolThresholdUpdated(bytes32 indexed poolId, uint256 oldThreshold, uint256 newThreshold);
     event VaultOrderCreated(bytes32 indexed orderId, address indexed trader, uint256 amount, bool zeroForOne);
     event OrderRoutedToVault(address indexed trader, bytes32 indexed orderId, PoolKey indexed key, bool zeroForOne, int256 amountSpecified, bytes32 commitment);
+    event VaultOrderExecuted(PoolKey indexed poolKey, uint256 amountIn, uint256 expectedAmountOut, uint256 actualAmount0, uint256 actualAmount1, bool zeroForOne);
+    event OrderMatched(bytes32 indexed orderId, address indexed trader, uint256 executionPrice, uint256 matchedAmount);
+    event LiquidityChecked(bytes32 indexed poolId, uint256 requiredAmount, uint256 availableLiquidity, bool sufficient);
 
     /// @notice Execution statistics for a pool
     struct ExecutionStats {
@@ -316,30 +319,6 @@ contract EigenVaultHook is BaseHook, ReentrancyGuard, Ownable, IEigenVaultHook {
         return result.isValid && error == ZKProofLib.ProofError.None;
     }
 
-    /// @notice Execute swap on Uniswap after ZK verification
-    /// @param order The vault order
-    function _executeSwapOnUniswap(VaultOrder storage order) internal {
-        // Create swap parameters for the pool manager
-        SwapParams memory swapParams = SwapParams({
-            zeroForOne: order.zeroForOne,
-            amountSpecified: int256(order.amount),
-            sqrtPriceLimitX96: 0 // No price limit
-        });
-        
-        // Execute the swap through the pool manager
-        try poolManager.swap(order.poolKey, swapParams, "") {
-            // Swap successful - update statistics
-            bytes32 poolId = PoolId.unwrap(PoolIdLibrary.toId(order.poolKey));
-            poolStats[poolId].totalVolume += order.amount;
-            poolStats[poolId].averageExecutionTime = 
-                (poolStats[poolId].averageExecutionTime + (block.timestamp - order.deadline + 1 hours)) / 2;
-        } catch {
-            // Swap failed - this could happen if pool conditions changed
-            // In production, you might want to retry or handle this differently
-            revert("Swap execution failed");
-        }
-    }
-
     /// @notice Get current price for a pool
     /// @param key The pool key
     function _getCurrentPrice(PoolKey calldata key) internal view returns (uint256) {
@@ -353,6 +332,214 @@ contract EigenVaultHook is BaseHook, ReentrancyGuard, Ownable, IEigenVaultHook {
         price = (price * price) >> 192; // Divide by 2^96 twice
         
         return price;
+    }
+
+    /// @notice Get comprehensive pool state including liquidity and fees
+    /// @param key The pool key
+    /// @return sqrtPriceX96 Current sqrt price in X96 format
+    /// @return tick Current tick
+    /// @return fee The pool fee
+    /// @return tickSpacing The tick spacing
+    function _getPoolState(PoolKey memory key) internal view returns (
+        uint160 sqrtPriceX96,
+        int24 tick,
+        uint24 fee,
+        uint24 tickSpacing
+    ) {
+        PoolId poolId = PoolIdLibrary.toId(key);
+        (sqrtPriceX96, tick, fee, tickSpacing) = StateLibrary.getSlot0(poolManager, poolId);
+    }
+
+    /// @notice Get pool liquidity at specific tick range (simplified)
+    /// @param key The pool key
+    /// @param tickLower Lower tick boundary
+    /// @param tickUpper Upper tick boundary
+    /// @return liquidity The liquidity at the specified range
+    function _getLiquidityAtTickRange(
+        PoolKey memory key,
+        int24 tickLower,
+        int24 tickUpper
+    ) internal view returns (uint128 liquidity) {
+        // Simplified liquidity query - in production, this would use proper position queries
+        // For now, return a reasonable estimate based on pool state
+        (uint160 sqrtPriceX96, int24 tick,,) = _getPoolState(key);
+        
+        // Calculate liquidity based on current price and tick range
+        if (tick >= tickLower && tick <= tickUpper) {
+            // Current tick is within range, estimate liquidity
+            liquidity = uint128(uint256(sqrtPriceX96) / 1e12); // Simplified calculation
+        } else {
+            // Current tick is outside range, minimal liquidity
+            liquidity = 1000; // Minimum liquidity threshold
+        }
+    }
+
+    /// @notice Calculate optimal swap amount considering slippage and liquidity
+    /// @param key The pool key
+    /// @param amountIn The input amount
+    /// @param zeroForOne Whether swapping token0 for token1
+    /// @param maxSlippageBps Maximum allowed slippage in basis points
+    /// @return amountOut The expected output amount
+    /// @return sqrtPriceLimitX96 The price limit for the swap
+    function _calculateOptimalSwapAmount(
+        PoolKey memory key,
+        uint256 amountIn,
+        bool zeroForOne,
+        uint256 maxSlippageBps
+    ) internal view returns (uint256 amountOut, uint160 sqrtPriceLimitX96) {
+        // Get current pool state
+        (uint160 sqrtPriceX96, int24 tick,,) = _getPoolState(key);
+        
+        // Estimate liquidity based on current price
+        uint128 liquidity = uint128(uint256(sqrtPriceX96) / 1e12);
+        
+        // Calculate price impact based on liquidity
+        uint256 priceImpact = _calculatePriceImpact(amountIn, liquidity, zeroForOne);
+        
+        // Apply slippage protection
+        uint256 maxPriceImpact = (maxSlippageBps * 100) / 10000; // Convert bps to percentage
+        
+        if (priceImpact > maxPriceImpact) {
+            // Reduce amount to meet slippage requirements
+            amountIn = (amountIn * maxPriceImpact) / priceImpact;
+        }
+        
+        // Calculate expected output using constant product formula
+        amountOut = _calculateOutputAmount(amountIn, sqrtPriceX96, liquidity, zeroForOne);
+        
+        // Set price limit to prevent excessive slippage
+        if (zeroForOne) {
+            // Swapping token0 for token1 (price decreases)
+            sqrtPriceLimitX96 = uint160(uint256(sqrtPriceX96) - (uint256(sqrtPriceX96) * maxSlippageBps) / 10000);
+        } else {
+            // Swapping token1 for token0 (price increases)
+            sqrtPriceLimitX96 = uint160(uint256(sqrtPriceX96) + (uint256(sqrtPriceX96) * maxSlippageBps) / 10000);
+        }
+    }
+
+    /// @notice Calculate price impact of a swap
+    /// @param amountIn The input amount
+    /// @param liquidity The pool liquidity
+    /// @param zeroForOne Whether swapping token0 for token1
+    /// @return priceImpact The price impact as a percentage
+    function _calculatePriceImpact(
+        uint256 amountIn,
+        uint128 liquidity,
+        bool zeroForOne
+    ) internal pure returns (uint256 priceImpact) {
+        // Simplified price impact calculation
+        // In production, this would use more sophisticated AMM math
+        if (liquidity == 0) return type(uint256).max;
+        
+        // Price impact = amountIn / (liquidity * 2)
+        priceImpact = (amountIn * 10000) / (uint256(liquidity) * 2);
+        
+        // Cap at 100%
+        if (priceImpact > 10000) priceImpact = 10000;
+    }
+
+    /// @notice Calculate expected output amount using constant product formula
+    /// @param amountIn The input amount
+    /// @param sqrtPriceX96 Current sqrt price
+    /// @param liquidity Current liquidity
+    /// @param zeroForOne Whether swapping token0 for token1
+    /// @return amountOut The expected output amount
+    function _calculateOutputAmount(
+        uint256 amountIn,
+        uint160 sqrtPriceX96,
+        uint128 liquidity,
+        bool zeroForOne
+    ) internal pure returns (uint256 amountOut) {
+        if (zeroForOne) {
+            // Swapping token0 for token1
+            // amountOut = (amountIn * liquidity) / (amountIn + liquidity * sqrtPriceX96^2 / 2^192)
+            uint256 price = uint256(sqrtPriceX96) * uint256(sqrtPriceX96) >> 192;
+            amountOut = (amountIn * uint256(liquidity)) / (amountIn + (uint256(liquidity) * price) / 1e18);
+        } else {
+            // Swapping token1 for token0
+            // amountOut = (amountIn * liquidity * sqrtPriceX96^2 / 2^192) / (amountIn + liquidity)
+            uint256 price = uint256(sqrtPriceX96) * uint256(sqrtPriceX96) >> 192;
+            amountOut = (amountIn * uint256(liquidity) * price / 1e18) / (amountIn + uint256(liquidity));
+        }
+    }
+
+    /// @notice Enhanced swap execution with slippage protection and liquidity checks
+    /// @param order The vault order
+    function _executeSwapOnUniswap(VaultOrder storage order) internal {
+        // Get optimal swap parameters
+        PoolKey memory poolKey = order.poolKey;
+        (uint256 expectedAmountOut, uint160 sqrtPriceLimitX96) = _calculateOptimalSwapAmount(
+            poolKey,
+            order.amount,
+            order.zeroForOne,
+            100 // 1% max slippage
+        );
+        
+        // Create enhanced swap parameters
+        SwapParams memory swapParams = SwapParams({
+            zeroForOne: order.zeroForOne,
+            amountSpecified: int256(order.amount),
+            sqrtPriceLimitX96: sqrtPriceLimitX96
+        });
+        
+        // Execute the swap through the pool manager with enhanced error handling
+        try poolManager.swap(poolKey, swapParams, "") returns (BalanceDelta delta) {
+            // Swap successful - update statistics
+            bytes32 poolId = PoolId.unwrap(PoolIdLibrary.toId(poolKey));
+            poolStats[poolId].totalVolume += order.amount;
+            poolStats[poolId].successfulMatches++;
+            poolStats[poolId].averageExecutionTime = 
+                (poolStats[poolId].averageExecutionTime + (block.timestamp - order.deadline + 1 hours)) / 2;
+            
+            // Log successful execution
+            emit VaultOrderExecuted(
+                poolKey,
+                order.amount,
+                expectedAmountOut,
+                delta.amount0() < 0 ? uint256(uint128(-delta.amount0())) : uint256(uint128(delta.amount0())),
+                delta.amount1() < 0 ? uint256(uint128(-delta.amount1())) : uint256(uint128(delta.amount1())),
+                order.zeroForOne
+            );
+        } catch Error(string memory reason) {
+            // Handle specific error cases
+            if (bytes(reason).length > 0) {
+                revert(string(abi.encodePacked("Swap failed: ", reason)));
+            } else {
+                revert("Swap execution failed");
+            }
+        } catch {
+            // Generic fallback
+            revert("Swap execution failed");
+        }
+    }
+
+    /// @notice Check if pool has sufficient liquidity for a swap
+    /// @param key The pool key
+    /// @param amount The swap amount
+    /// @param zeroForOne Whether swapping token0 for token1
+    /// @return hasLiquidity Whether the pool has sufficient liquidity
+    /// @return availableLiquidity The available liquidity
+    function _checkPoolLiquidity(
+        PoolKey memory key,
+        uint256 amount,
+        bool zeroForOne
+    ) internal view returns (bool hasLiquidity, uint256 availableLiquidity) {
+        (uint160 sqrtPriceX96,,,) = _getPoolState(key);
+        
+        // Estimate liquidity based on current price
+        availableLiquidity = uint256(sqrtPriceX96) / 1e12;
+        
+        // Simple liquidity check - in production, this would be more sophisticated
+        hasLiquidity = availableLiquidity >= amount * 2; // Require 2x liquidity for safety
+    }
+
+    /// @notice Get pool fee information
+    /// @param key The pool key
+    /// @return fee The pool fee in basis points
+    /// @return protocolFee The protocol fee in basis points
+    function _getPoolFees(PoolKey memory key) internal pure returns (uint24 fee, uint8 protocolFee) {
+        fee = key.fee;
+        protocolFee = 0; // Default protocol fee, could be made configurable
     }
 
     /// @notice Set pool threshold
@@ -516,5 +703,221 @@ contract EigenVaultHook is BaseHook, ReentrancyGuard, Ownable, IEigenVaultHook {
     /// @param newThreshold The new threshold in basis points
     function updateVaultThreshold(uint256 newThreshold) external override onlyOwner {
         _setVaultThreshold(newThreshold);
+    }
+
+    /// @notice Enhanced order matching with liquidity and price validation
+    /// @param orderId The order ID to match
+    /// @param matchingProof The ZK proof of valid matching
+    /// @return success Whether the order was successfully matched
+    function _executeOrderWithEnhancedMatching(
+        bytes32 orderId,
+        ZKProofLib.MatchingProof memory matchingProof
+    ) internal returns (bool success) {
+        VaultOrder storage order = vaultOrders[orderId];
+        require(!order.executed, "Order already executed");
+        require(block.timestamp <= order.deadline, "Order expired");
+        
+        // Verify ZK proof
+        (ZKProofLib.ProofResult memory result, ZKProofLib.ProofError error) = 
+            ZKProofLib.verifyMatchingProof(matchingProof, matchingProof.poolHash);
+        
+        if (!result.isValid || error != ZKProofLib.ProofError.None) {
+            return false;
+        }
+        
+        // Check pool liquidity before execution
+        PoolKey memory poolKey = order.poolKey;
+        (bool hasLiquidity, uint256 availableLiquidity) = _checkPoolLiquidity(
+            poolKey,
+            order.amount,
+            order.zeroForOne
+        );
+        
+        emit LiquidityChecked(
+            PoolId.unwrap(PoolIdLibrary.toId(order.poolKey)),
+            order.amount,
+            availableLiquidity,
+            hasLiquidity
+        );
+        
+        if (!hasLiquidity) {
+            // Insufficient liquidity - mark for fallback
+            poolStats[PoolId.unwrap(PoolIdLibrary.toId(order.poolKey))].fallbackExecutions++;
+            return false;
+        }
+        
+        // Execute the swap with enhanced Uniswap integration
+        _executeSwapOnUniswap(order);
+        
+        // Mark order as executed
+        order.executed = true;
+        
+        // Update pool statistics
+        bytes32 poolId = PoolId.unwrap(PoolIdLibrary.toId(order.poolKey));
+        poolStats[poolId].totalOrders++;
+        poolStats[poolId].successfulMatches++;
+        
+        // Emit matching event
+        emit OrderMatched(
+            orderId,
+            order.trader,
+            result.executionPrice,
+            result.totalVolume
+        );
+        
+        return true;
+    }
+
+    /// @notice Get comprehensive pool analytics for order routing decisions
+    /// @param key The pool key
+    /// @return poolState The current pool state
+    /// @return liquidityInfo Liquidity distribution information
+    /// @return feeInfo Fee and protocol information
+    /// @return volumeInfo Volume and execution statistics
+    function _getPoolAnalytics(PoolKey calldata key) internal view returns (
+        PoolState memory poolState,
+        LiquidityInfo memory liquidityInfo,
+        FeeInfo memory feeInfo,
+        VolumeInfo memory volumeInfo
+    ) {
+        // Get current pool state
+        (uint160 sqrtPriceX96, int24 tick, uint24 fee, uint24 tickSpacing) = _getPoolState(key);
+        
+        // Estimate liquidity based on current price
+        uint128 liquidity = uint128(uint256(sqrtPriceX96) / 1e12);
+        
+        poolState = PoolState({
+            sqrtPriceX96: sqrtPriceX96,
+            tick: tick,
+            liquidity: liquidity,
+            feeGrowthGlobal0X128: 0, // Not available in current implementation
+            feeGrowthGlobal1X128: 0, // Not available in current implementation
+            protocolFees: 0,          // Not available in current implementation
+            swapFees: 0               // Not available in current implementation
+        });
+        
+        // Get fee information
+        (uint24 poolFee, uint8 protocolFee) = _getPoolFees(key);
+        feeInfo = FeeInfo({
+            poolFee: poolFee,
+            protocolFee: protocolFee,
+            totalFees: uint256(poolFee) + uint256(protocolFee)
+        });
+        
+        // Get volume information
+        bytes32 poolId = PoolId.unwrap(PoolIdLibrary.toId(key));
+        ExecutionStats memory stats = poolStats[poolId];
+        volumeInfo = VolumeInfo({
+            totalVolume: stats.totalVolume,
+            totalOrders: stats.totalOrders,
+            successfulMatches: stats.successfulMatches,
+            fallbackExecutions: stats.fallbackExecutions,
+            averageExecutionTime: stats.averageExecutionTime
+        });
+        
+        // Calculate liquidity distribution (simplified)
+        liquidityInfo = LiquidityInfo({
+            totalLiquidity: uint256(liquidity),
+            concentratedLiquidity: uint256(liquidity) * 80 / 100, // Assume 80% concentrated
+            distributedLiquidity: uint256(liquidity) * 20 / 100,  // Assume 20% distributed
+            liquidityDepth: _calculateLiquidityDepth(key, liquidity)
+        });
+    }
+
+    /// @notice Calculate liquidity depth for price impact assessment
+    /// @param key The pool key
+    /// @param liquidity The current liquidity
+    /// @return depth The liquidity depth score
+    function _calculateLiquidityDepth(PoolKey memory key, uint128 liquidity) internal view returns (uint256 depth) {
+        // Get liquidity at different tick ranges for depth calculation
+        (uint160 sqrtPriceX96, int24 currentTick,,) = _getPoolState(key);
+        
+        // Sample liquidity at different tick ranges
+        uint128 liquidityAtTick1 = _getLiquidityAtTickRange(key, currentTick - 100, currentTick + 100);
+        uint128 liquidityAtTick2 = _getLiquidityAtTickRange(key, currentTick - 500, currentTick + 500);
+        uint128 liquidityAtTick3 = _getLiquidityAtTickRange(key, currentTick - 1000, currentTick + 1000);
+        
+        // Calculate depth as weighted average (ensure positive values)
+        depth = (uint256(liquidityAtTick1) * 50 + uint256(liquidityAtTick2) * 30 + uint256(liquidityAtTick3) * 20) / 100;
+    }
+
+    /// @notice Smart order routing based on pool analytics
+    /// @param key The pool key
+    /// @param amount The order amount
+    /// @param zeroForOne Whether swapping token0 for token1
+    /// @return shouldRouteToVault Whether to route to vault
+    /// @return reason The routing decision reason
+    function _smartOrderRouting(
+        PoolKey memory key,
+        uint256 amount,
+        bool zeroForOne
+    ) internal view returns (bool shouldRouteToVault, string memory reason) {
+        // Get comprehensive pool analytics
+        (PoolState memory poolState, LiquidityInfo memory liquidityInfo, FeeInfo memory feeInfo, VolumeInfo memory volumeInfo) = 
+            _getPoolAnalytics(key);
+        
+        // Check if order is large relative to liquidity
+        if (amount > liquidityInfo.totalLiquidity / 10) {
+            return (true, "Order size > 10% of total liquidity");
+        }
+        
+        // Check if pool has high fees (might want to route to vault for better pricing)
+        if (feeInfo.totalFees > 100) { // > 1%
+            return (true, "High pool fees - route to vault for better pricing");
+        }
+        
+        // Check if pool has low liquidity depth
+        if (liquidityInfo.liquidityDepth < liquidityInfo.totalLiquidity / 5) {
+            return (true, "Low liquidity depth - route to vault for better execution");
+        }
+        
+        // Check if pool has high volume (might indicate good execution)
+        if (volumeInfo.totalVolume > 0 && volumeInfo.successfulMatches > volumeInfo.totalOrders * 90 / 100) {
+            return (false, "High success rate - execute directly on pool");
+        }
+        
+        // Default to vault routing for large orders
+        if (amount > 1000e18) { // > 1000 tokens
+            return (true, "Large order - route to vault for private matching");
+        }
+        
+        return (false, "Standard order - execute directly on pool");
+    }
+
+    // ============ Enhanced Data Structures ============
+    
+    /// @notice Pool state information
+    struct PoolState {
+        uint160 sqrtPriceX96;
+        int24 tick;
+        uint128 liquidity;
+        uint256 feeGrowthGlobal0X128;
+        uint256 feeGrowthGlobal1X128;
+        uint128 protocolFees;
+        uint128 swapFees;
+    }
+    
+    /// @notice Liquidity distribution information
+    struct LiquidityInfo {
+        uint256 totalLiquidity;
+        uint256 concentratedLiquidity;
+        uint256 distributedLiquidity;
+        uint256 liquidityDepth;
+    }
+    
+    /// @notice Fee information
+    struct FeeInfo {
+        uint24 poolFee;
+        uint8 protocolFee;
+        uint256 totalFees;
+    }
+    
+    /// @notice Volume and execution information
+    struct VolumeInfo {
+        uint256 totalVolume;
+        uint256 totalOrders;
+        uint256 successfulMatches;
+        uint256 fallbackExecutions;
+        uint256 averageExecutionTime;
     }
 }
