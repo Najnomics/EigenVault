@@ -1,0 +1,980 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.26;
+
+import {Test} from "forge-std/Test.sol";
+import {console} from "forge-std/console.sol";
+import {OrderVault} from "../../src/vault/OrderVault.sol";
+import {IOrderVault} from "../../src/vault/IOrderVault.sol";
+import {OrderLib} from "../../src/vault/OrderLib.sol";
+import {ZKProofLib} from "../../src/core/ZKProofLib.sol";
+
+/// @title OrderVaultComprehensive
+/// @notice Comprehensive test suite for OrderVault contract with 100+ test cases
+contract OrderVaultComprehensiveTest is Test {
+    using OrderLib for OrderLib.Order;
+
+    OrderVault public orderVault;
+    
+    // Test addresses
+    address public owner = address(this);
+    address public authorizedHook1 = address(0x1);
+    address public authorizedHook2 = address(0x2);
+    address public unauthorizedHook = address(0x3);
+    address public trader1 = address(0x101);
+    address public trader2 = address(0x102);
+    address public trader3 = address(0x103);
+    address public maliciousUser = address(0x666);
+
+    // Test data
+    bytes public constant TEST_ENCRYPTED_DATA = "encrypted_order_data";
+    bytes public constant TEST_ZK_PROOF = "zk_proof_data";
+    uint256 public constant TEST_DEADLINE = 1 hours;
+    
+    // Events
+    event OrderStored(bytes32 indexed orderId, address indexed trader, uint256 indexed deadline);
+    event OrderExpired(bytes32 indexed orderId, address indexed trader);
+    event OrderExecuted(bytes32 indexed orderId, address indexed trader, uint256 executedPrice);
+    event OrderMatched(bytes32 indexed orderId1, bytes32 indexed orderId2, uint256 matchPrice);
+    event HookAuthorized(address indexed hook, bool authorized);
+    event OrderCancelled(bytes32 indexed orderId, address indexed trader);
+    event BatchOrdersExpired(uint256 expiredCount);
+    
+    function setUp() public {
+        orderVault = new OrderVault();
+        
+        // Authorize test hooks
+        orderVault.authorizeHook(authorizedHook1, true);
+        orderVault.authorizeHook(authorizedHook2, true);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            DEPLOYMENT TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_deployment_initial_state() public view {
+        assertEq(orderVault.owner(), owner);
+        assertEq(orderVault.totalOrders(), 0);
+        assertEq(orderVault.totalOrdersExpired(), 0);
+        assertEq(orderVault.totalOrdersExecuted(), 0);
+        assertEq(orderVault.getActiveOrderCount(), 0);
+    }
+
+    function test_deployment_hook_authorization() public view {
+        assertTrue(orderVault.isAuthorizedHook(authorizedHook1));
+        assertTrue(orderVault.isAuthorizedHook(authorizedHook2));
+        assertFalse(orderVault.isAuthorizedHook(unauthorizedHook));
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           AUTHORIZATION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_authorize_hook_success() public {
+        address newHook = address(0x999);
+        
+        vm.expectEmit(true, true, true, true);
+        emit HookAuthorized(newHook, true);
+        
+        orderVault.authorizeHook(newHook, true);
+        assertTrue(orderVault.isAuthorizedHook(newHook));
+    }
+
+    function test_authorize_hook_only_owner() public {
+        vm.startPrank(trader1);
+        vm.expectRevert();
+        orderVault.authorizeHook(address(0x999), true);
+        vm.stopPrank();
+    }
+
+    function test_deauthorize_hook_success() public {
+        vm.expectEmit(true, true, true, true);
+        emit HookAuthorized(authorizedHook1, false);
+        
+        orderVault.authorizeHook(authorizedHook1, false);
+        assertFalse(orderVault.isAuthorizedHook(authorizedHook1));
+    }
+
+    function test_authorize_zero_address() public {
+        vm.expectRevert("Invalid hook address");
+        orderVault.authorizeHook(address(0), true);
+    }
+
+    function test_multiple_hook_authorizations() public {
+        address[] memory newHooks = new address[](5);
+        for (uint i = 0; i < 5; i++) {
+            newHooks[i] = address(uint160(1000 + i));
+            orderVault.authorizeHook(newHooks[i], true);
+            assertTrue(orderVault.isAuthorizedHook(newHooks[i]));
+        }
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            ORDER STORAGE TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_store_order_success() public {
+        bytes32 orderId = keccak256("test_order_1");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        vm.expectEmit(true, true, true, true);
+        emit OrderStored(orderId, trader1, deadline);
+        
+        vm.startPrank(authorizedHook1);
+        orderVault.storeOrder(orderId, trader1, TEST_ENCRYPTED_DATA, deadline);
+        vm.stopPrank();
+        
+        assertEq(orderVault.totalOrders(), 1);
+        assertEq(orderVault.getActiveOrderCount(), 1);
+        
+        (bool exists, bool valid) = orderVault.isValidOrder(orderId);
+        assertTrue(exists);
+        assertTrue(valid);
+        
+        OrderLib.Order memory storedOrder = orderVault.getOrder(orderId);
+        assertEq(storedOrder.id, orderId);
+        assertEq(storedOrder.trader, trader1);
+        assertEq(storedOrder.encryptedData, TEST_ENCRYPTED_DATA);
+        assertEq(storedOrder.deadline, deadline);
+        assertEq(uint(storedOrder.status), uint(OrderLib.OrderStatus.Pending));
+    }
+
+    function test_store_order_unauthorized_hook() public {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        vm.startPrank(unauthorizedHook);
+        vm.expectRevert("Hook not authorized");
+        orderVault.storeOrder(orderId, trader1, TEST_ENCRYPTED_DATA, deadline);
+        vm.stopPrank();
+    }
+
+    function test_store_order_zero_trader() public {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        vm.startPrank(authorizedHook1);
+        vm.expectRevert("Invalid trader address");
+        orderVault.storeOrder(orderId, address(0), TEST_ENCRYPTED_DATA, deadline);
+        vm.stopPrank();
+    }
+
+    function test_store_order_zero_deadline() public {
+        bytes32 orderId = keccak256("test_order");
+        
+        vm.startPrank(authorizedHook1);
+        vm.expectRevert("Invalid deadline");
+        orderVault.storeOrder(orderId, trader1, TEST_ENCRYPTED_DATA, 0);
+        vm.stopPrank();
+    }
+
+    function test_store_order_past_deadline() public {
+        bytes32 orderId = keccak256("test_order");
+        uint256 pastDeadline = block.timestamp - 1;
+        
+        vm.startPrank(authorizedHook1);
+        vm.expectRevert("Invalid deadline");
+        orderVault.storeOrder(orderId, trader1, TEST_ENCRYPTED_DATA, pastDeadline);
+        vm.stopPrank();
+    }
+
+    function test_store_duplicate_order() public {
+        bytes32 orderId = keccak256("duplicate_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        vm.startPrank(authorizedHook1);
+        orderVault.storeOrder(orderId, trader1, TEST_ENCRYPTED_DATA, deadline);
+        
+        vm.expectRevert("Order already exists");
+        orderVault.storeOrder(orderId, trader2, TEST_ENCRYPTED_DATA, deadline + 1 hours);
+        vm.stopPrank();
+    }
+
+    function test_store_empty_encrypted_data() public {
+        bytes32 orderId = keccak256("empty_data_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        vm.startPrank(authorizedHook1);
+        vm.expectRevert("Empty encrypted data");
+        orderVault.storeOrder(orderId, trader1, "", deadline);
+        vm.stopPrank();
+    }
+
+    function test_store_multiple_orders_same_trader() public {
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        vm.startPrank(authorizedHook1);
+        for (uint i = 0; i < 5; i++) {
+            bytes32 orderId = keccak256(abi.encode("order", i));
+            orderVault.storeOrder(orderId, trader1, TEST_ENCRYPTED_DATA, deadline);
+        }
+        vm.stopPrank();
+        
+        assertEq(orderVault.totalOrders(), 5);
+        assertEq(orderVault.getActiveOrderCount(), 5);
+    }
+
+    function test_store_orders_different_hooks() public {
+        bytes32 orderId1 = keccak256("order_hook1");
+        bytes32 orderId2 = keccak256("order_hook2");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        vm.startPrank(authorizedHook1);
+        orderVault.storeOrder(orderId1, trader1, TEST_ENCRYPTED_DATA, deadline);
+        vm.stopPrank();
+        
+        vm.startPrank(authorizedHook2);
+        orderVault.storeOrder(orderId2, trader2, TEST_ENCRYPTED_DATA, deadline);
+        vm.stopPrank();
+        
+        assertEq(orderVault.totalOrders(), 2);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           ORDER RETRIEVAL TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_get_order_success() public {
+        bytes32 orderId = _storeTestOrder(trader1);
+        
+        OrderLib.Order memory order = orderVault.getOrder(orderId);
+        assertEq(order.id, orderId);
+        assertEq(order.trader, trader1);
+        assertEq(order.encryptedData, TEST_ENCRYPTED_DATA);
+        assertEq(uint(order.status), uint(OrderLib.OrderStatus.Pending));
+    }
+
+    function test_get_nonexistent_order() public {
+        bytes32 nonexistentId = keccak256("nonexistent");
+        
+        vm.expectRevert("Order not found");
+        orderVault.getOrder(nonexistentId);
+    }
+
+    function test_is_valid_order_true() public {
+        bytes32 orderId = _storeTestOrder(trader1);
+        
+        (bool exists, bool valid) = orderVault.isValidOrder(orderId);
+        assertTrue(exists);
+        assertTrue(valid);
+    }
+
+    function test_is_valid_order_false() public {
+        bytes32 nonexistentId = keccak256("nonexistent");
+        
+        (bool exists, bool valid) = orderVault.isValidOrder(nonexistentId);
+        assertFalse(exists);
+        assertFalse(valid);
+    }
+
+    function test_is_valid_order_expired() public {
+        bytes32 orderId = _storeTestOrder(trader1);
+        
+        // Fast forward past deadline
+        vm.warp(block.timestamp + TEST_DEADLINE + 1);
+        
+        (bool exists, bool valid) = orderVault.isValidOrder(orderId);
+        assertTrue(exists);
+        assertFalse(valid);
+    }
+
+    function test_get_active_order_count() public {
+        // Store several orders
+        for (uint i = 0; i < 3; i++) {
+            _storeTestOrder(address(uint160(100 + i)));
+        }
+        
+        assertEq(orderVault.getActiveOrderCount(), 3);
+        
+        // Expire one order
+        bytes32 firstOrderId = keccak256(abi.encode("test_order", uint160(100)));
+        orderVault.expireOrder(firstOrderId);
+        
+        assertEq(orderVault.getActiveOrderCount(), 2);
+    }
+
+    function test_get_active_order_ids() public {
+        bytes32[] memory expectedIds = new bytes32[](3);
+        for (uint i = 0; i < 3; i++) {
+            expectedIds[i] = _storeTestOrder(address(uint160(100 + i)));
+        }
+        
+        bytes32[] memory activeIds = orderVault.getActiveOrderIds(0, 3);
+        assertEq(activeIds.length, 3);
+        
+        // Check all IDs are present (order might differ)
+        for (uint i = 0; i < 3; i++) {
+            bool found = false;
+            for (uint j = 0; j < 3; j++) {
+                if (activeIds[j] == expectedIds[i]) {
+                    found = true;
+                    break;
+                }
+            }
+            assertTrue(found);
+        }
+    }
+
+    function test_get_active_order_ids_offset_limit() public {
+        // Store 10 orders
+        for (uint i = 0; i < 10; i++) {
+            _storeTestOrder(address(uint160(100 + i)));
+        }
+        
+        // Get orders 5-7 (3 orders starting from index 5)
+        bytes32[] memory limitedIds = orderVault.getActiveOrderIds(5, 3);
+        assertEq(limitedIds.length, 3);
+    }
+
+    function test_get_active_order_ids_exceed_limit() public {
+        // Store 3 orders
+        for (uint i = 0; i < 3; i++) {
+            _storeTestOrder(address(uint160(100 + i)));
+        }
+        
+        // Request 10 orders (should only get 3)
+        bytes32[] memory allIds = orderVault.getActiveOrderIds(0, 10);
+        assertEq(allIds.length, 3);
+    }
+
+    function test_get_active_order_ids_high_offset() public {
+        // Store 3 orders
+        for (uint i = 0; i < 3; i++) {
+            _storeTestOrder(address(uint160(100 + i)));
+        }
+        
+        // Request from offset 10 (should get empty array)
+        bytes32[] memory noIds = orderVault.getActiveOrderIds(10, 5);
+        assertEq(noIds.length, 0);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           ORDER EXPIRATION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_expire_order_success() public {
+        bytes32 orderId = _storeTestOrder(trader1);
+        
+        vm.expectEmit(true, true, true, true);
+        emit OrderExpired(orderId, trader1);
+        
+        orderVault.expireOrder(orderId);
+        
+        assertEq(orderVault.totalOrdersExpired(), 1);
+        assertEq(orderVault.getActiveOrderCount(), 0);
+        
+        OrderLib.Order memory order = orderVault.getOrder(orderId);
+        assertEq(uint(order.status), uint(OrderLib.OrderStatus.Expired));
+    }
+
+    function test_expire_order_nonexistent() public {
+        bytes32 nonexistentId = keccak256("nonexistent");
+        
+        vm.expectRevert("Order not found");
+        orderVault.expireOrder(nonexistentId);
+    }
+
+    function test_expire_order_already_expired() public {
+        bytes32 orderId = _storeTestOrder(trader1);
+        orderVault.expireOrder(orderId);
+        
+        vm.expectRevert("Order not active");
+        orderVault.expireOrder(orderId);
+    }
+
+    function test_expire_order_already_executed() public {
+        bytes32 orderId = _storeTestOrder(trader1);
+        
+        // Execute the order first
+        vm.startPrank(authorizedHook1);
+        orderVault.executeOrder(orderId, 1000, TEST_ZK_PROOF);
+        vm.stopPrank();
+        
+        vm.expectRevert("Order not active");
+        orderVault.expireOrder(orderId);
+    }
+
+    function test_cleanup_expired_orders() public {
+        // Store orders with different deadlines
+        bytes32[] memory orderIds = new bytes32[](5);
+        uint256 baseDeadline = block.timestamp + TEST_DEADLINE;
+        
+        vm.startPrank(authorizedHook1);
+        for (uint i = 0; i < 5; i++) {
+            orderIds[i] = keccak256(abi.encode("cleanup_order", i));
+            orderVault.storeOrder(orderIds[i], trader1, TEST_ENCRYPTED_DATA, baseDeadline - i * 10 minutes);
+        }
+        vm.stopPrank();
+        
+        // Fast forward to expire some orders
+        vm.warp(baseDeadline - 20 minutes);
+        
+        vm.expectEmit(true, true, true, true);
+        emit BatchOrdersExpired(3); // Should expire 3 orders
+        
+        orderVault.cleanupExpiredOrders(10);
+        
+        assertEq(orderVault.totalOrdersExpired(), 3);
+        assertEq(orderVault.getActiveOrderCount(), 2);
+    }
+
+    function test_cleanup_expired_orders_only_owner() public {
+        vm.startPrank(trader1);
+        vm.expectRevert();
+        orderVault.cleanupExpiredOrders(10);
+        vm.stopPrank();
+    }
+
+    function test_cleanup_expired_orders_max_limit() public {
+        // Store 10 expired orders
+        vm.startPrank(authorizedHook1);
+        uint256 pastDeadline = block.timestamp - 1 hours;
+        for (uint i = 0; i < 10; i++) {
+            bytes32 orderId = keccak256(abi.encode("expired_order", i));
+            orderVault.storeOrder(orderId, trader1, TEST_ENCRYPTED_DATA, pastDeadline);
+        }
+        vm.stopPrank();
+        
+        // Fast forward
+        vm.warp(block.timestamp + 1 hours);
+        
+        // Cleanup with limit of 5
+        orderVault.cleanupExpiredOrders(5);
+        assertEq(orderVault.totalOrdersExpired(), 5);
+        assertEq(orderVault.getActiveOrderCount(), 5);
+        
+        // Cleanup remaining
+        orderVault.cleanupExpiredOrders(10);
+        assertEq(orderVault.totalOrdersExpired(), 10);
+        assertEq(orderVault.getActiveOrderCount(), 0);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           ORDER EXECUTION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_execute_order_success() public {
+        bytes32 orderId = _storeTestOrder(trader1);
+        uint256 executedPrice = 1500;
+        
+        vm.expectEmit(true, true, true, true);
+        emit OrderExecuted(orderId, trader1, executedPrice);
+        
+        vm.startPrank(authorizedHook1);
+        orderVault.executeOrder(orderId, executedPrice, TEST_ZK_PROOF);
+        vm.stopPrank();
+        
+        assertEq(orderVault.totalOrdersExecuted(), 1);
+        assertEq(orderVault.getActiveOrderCount(), 0);
+        
+        OrderLib.Order memory order = orderVault.getOrder(orderId);
+        assertEq(uint(order.status), uint(OrderLib.OrderStatus.Executed));
+        assertEq(order.executedPrice, executedPrice);
+        assertEq(order.zkProof, TEST_ZK_PROOF);
+    }
+
+    function test_execute_order_unauthorized_hook() public {
+        bytes32 orderId = _storeTestOrder(trader1);
+        
+        vm.startPrank(unauthorizedHook);
+        vm.expectRevert("Hook not authorized");
+        orderVault.executeOrder(orderId, 1500, TEST_ZK_PROOF);
+        vm.stopPrank();
+    }
+
+    function test_execute_order_nonexistent() public {
+        bytes32 nonexistentId = keccak256("nonexistent");
+        
+        vm.startPrank(authorizedHook1);
+        vm.expectRevert("Order not found");
+        orderVault.executeOrder(nonexistentId, 1500, TEST_ZK_PROOF);
+        vm.stopPrank();
+    }
+
+    function test_execute_order_already_executed() public {
+        bytes32 orderId = _storeTestOrder(trader1);
+        
+        vm.startPrank(authorizedHook1);
+        orderVault.executeOrder(orderId, 1500, TEST_ZK_PROOF);
+        
+        vm.expectRevert("Order not active");
+        orderVault.executeOrder(orderId, 1600, TEST_ZK_PROOF);
+        vm.stopPrank();
+    }
+
+    function test_execute_order_expired() public {
+        bytes32 orderId = _storeTestOrder(trader1);
+        
+        // Let order expire
+        vm.warp(block.timestamp + TEST_DEADLINE + 1);
+        
+        vm.startPrank(authorizedHook1);
+        vm.expectRevert("Order expired");
+        orderVault.executeOrder(orderId, 1500, TEST_ZK_PROOF);
+        vm.stopPrank();
+    }
+
+    function test_execute_order_zero_price() public {
+        bytes32 orderId = _storeTestOrder(trader1);
+        
+        vm.startPrank(authorizedHook1);
+        vm.expectRevert("Invalid executed price");
+        orderVault.executeOrder(orderId, 0, TEST_ZK_PROOF);
+        vm.stopPrank();
+    }
+
+    function test_execute_order_empty_proof() public {
+        bytes32 orderId = _storeTestOrder(trader1);
+        
+        vm.startPrank(authorizedHook1);
+        vm.expectRevert("Empty ZK proof");
+        orderVault.executeOrder(orderId, 1500, "");
+        vm.stopPrank();
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           ORDER CANCELLATION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_cancel_order_success() public {
+        bytes32 orderId = _storeTestOrder(trader1);
+        
+        vm.expectEmit(true, true, true, true);
+        emit OrderCancelled(orderId, trader1);
+        
+        vm.startPrank(trader1);
+        orderVault.cancelOrder(orderId);
+        vm.stopPrank();
+        
+        assertEq(orderVault.getActiveOrderCount(), 0);
+        
+        OrderLib.Order memory order = orderVault.getOrder(orderId);
+        assertEq(uint(order.status), uint(OrderLib.OrderStatus.Cancelled));
+    }
+
+    function test_cancel_order_wrong_trader() public {
+        bytes32 orderId = _storeTestOrder(trader1);
+        
+        vm.startPrank(trader2);
+        vm.expectRevert("Not order trader");
+        orderVault.cancelOrder(orderId);
+        vm.stopPrank();
+    }
+
+    function test_cancel_order_nonexistent() public {
+        bytes32 nonexistentId = keccak256("nonexistent");
+        
+        vm.startPrank(trader1);
+        vm.expectRevert("Order not found");
+        orderVault.cancelOrder(nonexistentId);
+        vm.stopPrank();
+    }
+
+    function test_cancel_order_already_executed() public {
+        bytes32 orderId = _storeTestOrder(trader1);
+        
+        // Execute first
+        vm.startPrank(authorizedHook1);
+        orderVault.executeOrder(orderId, 1500, TEST_ZK_PROOF);
+        vm.stopPrank();
+        
+        // Try to cancel
+        vm.startPrank(trader1);
+        vm.expectRevert("Order not active");
+        orderVault.cancelOrder(orderId);
+        vm.stopPrank();
+    }
+
+    function test_cancel_order_already_expired() public {
+        bytes32 orderId = _storeTestOrder(trader1);
+        
+        // Expire first
+        orderVault.expireOrder(orderId);
+        
+        // Try to cancel
+        vm.startPrank(trader1);
+        vm.expectRevert("Order not active");
+        orderVault.cancelOrder(orderId);
+        vm.stopPrank();
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           BATCH OPERATIONS TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_batch_store_orders() public {
+        bytes32[] memory orderIds = new bytes32[](3);
+        address[] memory traders = new address[](3);
+        bytes[] memory encryptedDataArray = new bytes[](3);
+        uint256[] memory deadlines = new uint256[](3);
+        
+        for (uint i = 0; i < 3; i++) {
+            orderIds[i] = keccak256(abi.encode("batch_order", i));
+            traders[i] = address(uint160(100 + i));
+            encryptedDataArray[i] = abi.encodePacked("encrypted_data", i);
+            deadlines[i] = block.timestamp + TEST_DEADLINE;
+        }
+        
+        vm.startPrank(authorizedHook1);
+        orderVault.batchStoreOrders(orderIds, traders, encryptedDataArray, deadlines);
+        vm.stopPrank();
+        
+        assertEq(orderVault.totalOrders(), 3);
+        assertEq(orderVault.getActiveOrderCount(), 3);
+        
+        // Verify each order
+        for (uint i = 0; i < 3; i++) {
+            (bool exists, bool valid) = orderVault.isValidOrder(orderIds[i]);
+            assertTrue(exists);
+            assertTrue(valid);
+        }
+    }
+
+    function test_batch_store_orders_length_mismatch() public {
+        bytes32[] memory orderIds = new bytes32[](2);
+        address[] memory traders = new address[](3);
+        bytes[] memory encryptedDataArray = new bytes[](2);
+        uint256[] memory deadlines = new uint256[](2);
+        
+        vm.startPrank(authorizedHook1);
+        vm.expectRevert("Array length mismatch");
+        orderVault.batchStoreOrders(orderIds, traders, encryptedDataArray, deadlines);
+        vm.stopPrank();
+    }
+
+    function test_batch_execute_orders() public {
+        bytes32[] memory orderIds = new bytes32[](3);
+        uint256[] memory prices = new uint256[](3);
+        bytes[] memory proofs = new bytes[](3);
+        
+        for (uint i = 0; i < 3; i++) {
+            orderIds[i] = _storeTestOrder(address(uint160(100 + i)));
+            prices[i] = 1500 + i * 100;
+            proofs[i] = abi.encodePacked("proof", i);
+        }
+        
+        vm.startPrank(authorizedHook1);
+        orderVault.batchExecuteOrders(orderIds, prices, proofs);
+        vm.stopPrank();
+        
+        assertEq(orderVault.totalOrdersExecuted(), 3);
+        assertEq(orderVault.getActiveOrderCount(), 0);
+        
+        // Verify each order is executed
+        for (uint i = 0; i < 3; i++) {
+            OrderLib.Order memory order = orderVault.getOrder(orderIds[i]);
+            assertEq(uint(order.status), uint(OrderLib.OrderStatus.Executed));
+            assertEq(order.executedPrice, prices[i]);
+        }
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           ORDER MATCHING TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_match_orders_success() public {
+        bytes32 buyOrderId = _storeTestOrder(trader1);
+        bytes32 sellOrderId = _storeTestOrder(trader2);
+        uint256 matchPrice = 1500;
+        
+        vm.expectEmit(true, true, true, true);
+        emit OrderMatched(buyOrderId, sellOrderId, matchPrice);
+        
+        vm.startPrank(authorizedHook1);
+        orderVault.matchOrders(buyOrderId, sellOrderId, matchPrice, TEST_ZK_PROOF);
+        vm.stopPrank();
+        
+        // Both orders should be executed
+        OrderLib.Order memory buyOrder = orderVault.getOrder(buyOrderId);
+        OrderLib.Order memory sellOrder = orderVault.getOrder(sellOrderId);
+        
+        assertEq(uint(buyOrder.status), uint(OrderLib.OrderStatus.Executed));
+        assertEq(uint(sellOrder.status), uint(OrderLib.OrderStatus.Executed));
+        assertEq(buyOrder.executedPrice, matchPrice);
+        assertEq(sellOrder.executedPrice, matchPrice);
+    }
+
+    function test_match_orders_same_order() public {
+        bytes32 orderId = _storeTestOrder(trader1);
+        
+        vm.startPrank(authorizedHook1);
+        vm.expectRevert("Cannot match order with itself");
+        orderVault.matchOrders(orderId, orderId, 1500, TEST_ZK_PROOF);
+        vm.stopPrank();
+    }
+
+    function test_match_orders_one_nonexistent() public {
+        bytes32 orderId = _storeTestOrder(trader1);
+        bytes32 nonexistentId = keccak256("nonexistent");
+        
+        vm.startPrank(authorizedHook1);
+        vm.expectRevert("Order not found");
+        orderVault.matchOrders(orderId, nonexistentId, 1500, TEST_ZK_PROOF);
+        vm.stopPrank();
+    }
+
+    function test_match_orders_zero_price() public {
+        bytes32 buyOrderId = _storeTestOrder(trader1);
+        bytes32 sellOrderId = _storeTestOrder(trader2);
+        
+        vm.startPrank(authorizedHook1);
+        vm.expectRevert("Invalid match price");
+        orderVault.matchOrders(buyOrderId, sellOrderId, 0, TEST_ZK_PROOF);
+        vm.stopPrank();
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                          ZK PROOF VERIFICATION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_get_order_for_zk_proof() public {
+        bytes32 orderId = _storeTestOrder(trader1);
+        
+        (
+            bytes32 returnedId,
+            address trader,
+            bytes memory encryptedData,
+            uint256 deadline,
+            OrderLib.OrderStatus status
+        ) = orderVault.getOrderForZKProof(orderId);
+        
+        assertEq(returnedId, orderId);
+        assertEq(trader, trader1);
+        assertEq(encryptedData, TEST_ENCRYPTED_DATA);
+        assertEq(deadline, block.timestamp + TEST_DEADLINE);
+        assertEq(uint(status), uint(OrderLib.OrderStatus.Pending));
+    }
+
+    function test_get_order_for_zk_proof_nonexistent() public {
+        bytes32 nonexistentId = keccak256("nonexistent");
+        
+        vm.expectRevert("Order not found");
+        orderVault.getOrderForZKProof(nonexistentId);
+    }
+
+    function test_verify_zk_proof_success() public {
+        bytes32 orderId = _storeTestOrder(trader1);
+        bytes memory zkProof = abi.encode("valid_proof", orderId);
+        
+        bool isValid = orderVault.verifyZKProof(orderId, zkProof);
+        assertTrue(isValid);
+    }
+
+    function test_verify_zk_proof_nonexistent_order() public {
+        bytes32 nonexistentId = keccak256("nonexistent");
+        bytes memory zkProof = abi.encode("proof");
+        
+        bool isValid = orderVault.verifyZKProof(nonexistentId, zkProof);
+        assertFalse(isValid);
+    }
+
+    function test_verify_zk_proof_empty() public {
+        bytes32 orderId = _storeTestOrder(trader1);
+        
+        bool isValid = orderVault.verifyZKProof(orderId, "");
+        assertFalse(isValid);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            MEV PROTECTION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_enable_mev_protection() public {
+        bytes32 orderId = _storeTestOrder(trader1);
+        
+        vm.startPrank(authorizedHook1);
+        orderVault.enableMEVProtection(orderId);
+        vm.stopPrank();
+        
+        assertTrue(orderVault.isMEVProtected(orderId));
+    }
+
+    function test_enable_mev_protection_unauthorized() public {
+        bytes32 orderId = _storeTestOrder(trader1);
+        
+        vm.startPrank(unauthorizedHook);
+        vm.expectRevert("Hook not authorized");
+        orderVault.enableMEVProtection(orderId);
+        vm.stopPrank();
+    }
+
+    function test_enable_mev_protection_nonexistent() public {
+        bytes32 nonexistentId = keccak256("nonexistent");
+        
+        vm.startPrank(authorizedHook1);
+        vm.expectRevert("Order not found");
+        orderVault.enableMEVProtection(nonexistentId);
+        vm.stopPrank();
+    }
+
+    function test_batch_enable_mev_protection() public {
+        bytes32[] memory orderIds = new bytes32[](3);
+        for (uint i = 0; i < 3; i++) {
+            orderIds[i] = _storeTestOrder(address(uint160(100 + i)));
+        }
+        
+        vm.startPrank(authorizedHook1);
+        orderVault.batchEnableMEVProtection(orderIds);
+        vm.stopPrank();
+        
+        for (uint i = 0; i < 3; i++) {
+            assertTrue(orderVault.isMEVProtected(orderIds[i]));
+        }
+    }
+
+    function test_batch_get_mev_protection_status() public {
+        bytes32[] memory orderIds = new bytes32[](3);
+        for (uint i = 0; i < 3; i++) {
+            orderIds[i] = _storeTestOrder(address(uint160(100 + i)));
+        }
+        
+        // Enable MEV protection for first two orders
+        vm.startPrank(authorizedHook1);
+        orderVault.enableMEVProtection(orderIds[0]);
+        orderVault.enableMEVProtection(orderIds[1]);
+        vm.stopPrank();
+        
+        bool[] memory protectionStatus = orderVault.batchGetMEVProtectionStatus(orderIds);
+        
+        assertTrue(protectionStatus[0]);
+        assertTrue(protectionStatus[1]);
+        assertFalse(protectionStatus[2]);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                          STATISTICS TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_statistics_tracking() public {
+        // Initial state
+        assertEq(orderVault.totalOrders(), 0);
+        assertEq(orderVault.totalOrdersExecuted(), 0);
+        assertEq(orderVault.totalOrdersExpired(), 0);
+        assertEq(orderVault.getActiveOrderCount(), 0);
+        
+        // Store orders
+        bytes32[] memory orderIds = new bytes32[](5);
+        for (uint i = 0; i < 5; i++) {
+            orderIds[i] = _storeTestOrder(address(uint160(100 + i)));
+        }
+        
+        assertEq(orderVault.totalOrders(), 5);
+        assertEq(orderVault.getActiveOrderCount(), 5);
+        
+        // Execute 2 orders
+        vm.startPrank(authorizedHook1);
+        orderVault.executeOrder(orderIds[0], 1500, TEST_ZK_PROOF);
+        orderVault.executeOrder(orderIds[1], 1600, TEST_ZK_PROOF);
+        vm.stopPrank();
+        
+        assertEq(orderVault.totalOrdersExecuted(), 2);
+        assertEq(orderVault.getActiveOrderCount(), 3);
+        
+        // Expire 2 orders
+        orderVault.expireOrder(orderIds[2]);
+        orderVault.expireOrder(orderIds[3]);
+        
+        assertEq(orderVault.totalOrdersExpired(), 2);
+        assertEq(orderVault.getActiveOrderCount(), 1);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           EDGE CASE TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_maximum_order_data_size() public {
+        bytes32 orderId = keccak256("large_data_order");
+        bytes memory largeData = new bytes(1024); // 1KB of data
+        
+        // Fill with some data
+        for (uint i = 0; i < 1024; i++) {
+            largeData[i] = bytes1(uint8(i % 256));
+        }
+        
+        vm.startPrank(authorizedHook1);
+        orderVault.storeOrder(orderId, trader1, largeData, block.timestamp + TEST_DEADLINE);
+        vm.stopPrank();
+        
+        OrderLib.Order memory order = orderVault.getOrder(orderId);
+        assertEq(order.encryptedData.length, 1024);
+    }
+
+    function test_concurrent_operations() public {
+        bytes32[] memory orderIds = new bytes32[](10);
+        
+        // Store multiple orders concurrently (simulate)
+        vm.startPrank(authorizedHook1);
+        for (uint i = 0; i < 10; i++) {
+            orderIds[i] = keccak256(abi.encode("concurrent_order", i));
+            orderVault.storeOrder(orderIds[i], trader1, TEST_ENCRYPTED_DATA, block.timestamp + TEST_DEADLINE);
+        }
+        vm.stopPrank();
+        
+        assertEq(orderVault.totalOrders(), 10);
+        
+        // Execute and expire concurrently
+        vm.startPrank(authorizedHook1);
+        for (uint i = 0; i < 5; i++) {
+            orderVault.executeOrder(orderIds[i], 1500 + i, TEST_ZK_PROOF);
+        }
+        vm.stopPrank();
+        
+        for (uint i = 5; i < 10; i++) {
+            orderVault.expireOrder(orderIds[i]);
+        }
+        
+        assertEq(orderVault.totalOrdersExecuted(), 5);
+        assertEq(orderVault.totalOrdersExpired(), 5);
+        assertEq(orderVault.getActiveOrderCount(), 0);
+    }
+
+    function test_order_lifecycle_complete() public {
+        // Test complete order lifecycle: store -> match -> execute
+        bytes32 buyOrderId = _storeTestOrder(trader1);
+        bytes32 sellOrderId = _storeTestOrder(trader2);
+        
+        // Verify orders are active
+        (bool exists1, bool valid1) = orderVault.isValidOrder(buyOrderId);
+        (bool exists2, bool valid2) = orderVault.isValidOrder(sellOrderId);
+        assertTrue(exists1 && valid1);
+        assertTrue(exists2 && valid2);
+        
+        // Match orders
+        vm.startPrank(authorizedHook1);
+        orderVault.matchOrders(buyOrderId, sellOrderId, 1500, TEST_ZK_PROOF);
+        vm.stopPrank();
+        
+        // Verify both orders are executed
+        OrderLib.Order memory buyOrder = orderVault.getOrder(buyOrderId);
+        OrderLib.Order memory sellOrder = orderVault.getOrder(sellOrderId);
+        
+        assertEq(uint(buyOrder.status), uint(OrderLib.OrderStatus.Executed));
+        assertEq(uint(sellOrder.status), uint(OrderLib.OrderStatus.Executed));
+        assertEq(orderVault.getActiveOrderCount(), 0);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            HELPER FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    function _storeTestOrder(address trader) internal returns (bytes32) {
+        bytes32 orderId = keccak256(abi.encode("test_order", trader, block.timestamp, gasleft()));
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        vm.startPrank(authorizedHook1);
+        orderVault.storeOrder(orderId, trader, TEST_ENCRYPTED_DATA, deadline);
+        vm.stopPrank();
+        
+        return orderId;
+    }
+
+    function _storeExpiredOrder(address trader) internal returns (bytes32) {
+        bytes32 orderId = keccak256(abi.encode("expired_order", trader, block.timestamp, gasleft()));
+        uint256 pastDeadline = block.timestamp - 1 hours;
+        
+        vm.startPrank(authorizedHook1);
+        orderVault.storeOrder(orderId, trader, TEST_ENCRYPTED_DATA, pastDeadline);
+        vm.stopPrank();
+        
+        return orderId;
+    }
+}

@@ -32,6 +32,22 @@ type Aggregator struct {
 	tasksMutex    sync.RWMutex
 	tasks         map[uint32]*TaskInfo
 	httpServer    *http.Server
+	
+	// Enhanced operator management
+	operatorsMutex     sync.RWMutex
+	registeredOperators map[common.Address]*OperatorInfo
+	operatorWeights     map[common.Address]uint64
+	operatorPerformance map[common.Address]*PerformanceMetrics
+	
+	// Consensus management
+	consensusMutex      sync.RWMutex
+	consensusResponses  map[uint32]map[common.Address]*ConsensusResponse
+	consensusThresholds map[uint32]uint64
+	
+	// ZK proof verification
+	zkVerifier          *ZKProofVerifier
+	proofCache          map[string]*ZKProof
+	proofCacheMutex     sync.RWMutex
 }
 
 type Config struct {
@@ -42,6 +58,15 @@ type Config struct {
 	AggregatorPrivateKeyPath      string `json:"aggregator_private_key_path"`
 	EigenMetricsIpPortAddress     string `json:"eigen_metrics_ip_port_address"`
 	EnableMetrics                 bool   `json:"enable_metrics"`
+	
+	// ZK proof configuration
+	ZKVerificationKeyPath string `json:"zk_verification_key_path"`
+	
+	// Enhanced aggregator settings
+	ConsensusThreshold    uint64        `json:"consensus_threshold"`
+	TaskTimeout          time.Duration `json:"task_timeout"`
+	MaxConcurrentTasks   int           `json:"max_concurrent_tasks"`
+	OperatorHealthCheck  time.Duration `json:"operator_health_check"`
 }
 
 type TaskInfo struct {
@@ -89,6 +114,56 @@ type SignedTaskResponse struct {
 	OperatorId   types.OperatorId    `json:"operatorId"`
 }
 
+type OperatorInfo struct {
+	Address         common.Address `json:"address"`
+	OperatorId      types.OperatorId `json:"operatorId"`
+	Weight          uint64         `json:"weight"`
+	Stake           *big.Int       `json:"stake"`
+	PerformanceScore float64       `json:"performanceScore"`
+	LastHeartbeat   time.Time      `json:"lastHeartbeat"`
+	IsActive        bool           `json:"isActive"`
+	RegisteredAt    time.Time      `json:"registeredAt"`
+}
+
+type PerformanceMetrics struct {
+	TotalTasks       uint64        `json:"totalTasks"`
+	CompletedTasks   uint64        `json:"completedTasks"`
+	FailedTasks      uint64        `json:"failedTasks"`
+	AverageLatency   time.Duration `json:"averageLatency"`
+	Uptime           float64       `json:"uptime"`
+	LastUpdated      time.Time     `json:"lastUpdated"`
+}
+
+type ConsensusResponse struct {
+	TaskId        uint32
+	MatchHash     common.Hash
+	ExecutionPrice *big.Int
+	Signature     []byte
+	Timestamp     time.Time
+	ZKProof       *ZKProof
+	OperatorId    types.OperatorId
+}
+
+type ZKProof struct {
+	Proof         []byte
+	PublicInputs  []*big.Int
+	VerificationKey []byte
+	Timestamp     time.Time
+}
+
+type ZKProofVerifier struct {
+	verificationKeyPath string
+}
+
+type OrderMatchingResult struct {
+	TaskId        uint32         `json:"taskId"`
+	MatchedOrders []MatchedOrder `json:"matchedOrders"`
+	ExecutionPrice *big.Int      `json:"executionPrice"`
+	ConsensusHash common.Hash    `json:"consensusHash"`
+	ZKProof       *ZKProof       `json:"zkProof,omitempty"`
+	Timestamp     time.Time      `json:"timestamp"`
+}
+
 func NewAggregator(config Config, logger logging.Logger) (*Aggregator, error) {
 	logger = logger.With("component", "aggregator")
 
@@ -112,6 +187,11 @@ func NewAggregator(config Config, logger logging.Logger) (*Aggregator, error) {
 	// For now, we'll skip this as it requires key management
 	var avsWriter avsregistry.AvsRegistryChainWriter
 
+	// Initialize ZK proof verifier
+	zkVerifier := &ZKProofVerifier{
+		verificationKeyPath: config.ZKVerificationKeyPath,
+	}
+
 	aggregator := &Aggregator{
 		config:     config,
 		logger:     logger,
@@ -120,6 +200,19 @@ func NewAggregator(config Config, logger logging.Logger) (*Aggregator, error) {
 		avsWriter:  avsWriter,
 		avsReader:  *avsReader,
 		tasks:      make(map[uint32]*TaskInfo),
+		
+		// Enhanced operator management
+		registeredOperators: make(map[common.Address]*OperatorInfo),
+		operatorWeights:     make(map[common.Address]uint64),
+		operatorPerformance: make(map[common.Address]*PerformanceMetrics),
+		
+		// Consensus management
+		consensusResponses:  make(map[uint32]map[common.Address]*ConsensusResponse),
+		consensusThresholds: make(map[uint32]uint64),
+		
+		// ZK proof verification
+		zkVerifier:          zkVerifier,
+		proofCache:          make(map[string]*ZKProof),
 	}
 
 	// Setup HTTP server
@@ -355,4 +448,92 @@ func (a *Aggregator) storeResponse(response *SignedTaskResponse) {
 		"totalResponses", len(task.TaskResponses),
 		"matchHash", response.TaskResponse.MatchHash.Hex(),
 	)
+}
+
+// Enhanced aggregator methods
+
+// RegisterOperator registers a new operator with the aggregator
+func (a *Aggregator) RegisterOperator(operatorAddr common.Address, operatorId types.OperatorId, weight uint64, stake *big.Int) {
+	a.operatorsMutex.Lock()
+	defer a.operatorsMutex.Unlock()
+	
+	operatorInfo := &OperatorInfo{
+		Address:         operatorAddr,
+		OperatorId:      operatorId,
+		Weight:          weight,
+		Stake:           stake,
+		PerformanceScore: 1.0,
+		LastHeartbeat:   time.Now(),
+		IsActive:        true,
+		RegisteredAt:    time.Now(),
+	}
+	
+	a.registeredOperators[operatorAddr] = operatorInfo
+	a.operatorWeights[operatorAddr] = weight
+	a.operatorPerformance[operatorAddr] = &PerformanceMetrics{
+		TotalTasks:     0,
+		CompletedTasks: 0,
+		FailedTasks:    0,
+		AverageLatency: 0,
+		Uptime:         100.0,
+		LastUpdated:    time.Now(),
+	}
+	
+	a.logger.Info("Operator registered", 
+		"address", operatorAddr.Hex(),
+		"operatorId", fmt.Sprintf("0x%x", operatorId[:]),
+		"weight", weight,
+		"stake", stake.String())
+}
+
+// GetActiveOperators returns all active operators
+func (a *Aggregator) GetActiveOperators() []*OperatorInfo {
+	a.operatorsMutex.RLock()
+	defer a.operatorsMutex.RUnlock()
+	
+	var activeOperators []*OperatorInfo
+	for _, operator := range a.registeredOperators {
+		if operator.IsActive {
+			activeOperators = append(activeOperators, operator)
+		}
+	}
+	
+	return activeOperators
+}
+
+// GetAggregatorStatistics returns statistics about the aggregator
+func (a *Aggregator) GetAggregatorStatistics() map[string]interface{} {
+	a.operatorsMutex.RLock()
+	a.tasksMutex.RLock()
+	defer a.operatorsMutex.RUnlock()
+	defer a.tasksMutex.RUnlock()
+	
+	activeOperators := 0
+	totalStake := big.NewInt(0)
+	
+	for _, operator := range a.registeredOperators {
+		if operator.IsActive {
+			activeOperators++
+			totalStake.Add(totalStake, operator.Stake)
+		}
+	}
+	
+	completedTasks := 0
+	activeTasks := 0
+	
+	for _, task := range a.tasks {
+		if task.IsCompleted {
+			completedTasks++
+		} else {
+			activeTasks++
+		}
+	}
+	
+	return map[string]interface{}{
+		"activeOperators":  activeOperators,
+		"totalStake":       totalStake.String(),
+		"completedTasks":   completedTasks,
+		"activeTasks":      activeTasks,
+		"consensusThreshold": a.config.ConsensusThreshold,
+	}
 } 

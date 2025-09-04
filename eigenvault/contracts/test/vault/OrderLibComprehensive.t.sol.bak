@@ -1,0 +1,1041 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.26;
+
+import {Test} from "forge-std/Test.sol";
+import {console} from "forge-std/console.sol";
+import {OrderLib} from "../../src/vault/OrderLib.sol";
+
+/// @title OrderLibComprehensive
+/// @notice Comprehensive test suite for OrderLib library covering all order operations
+contract OrderLibComprehensiveTest is Test {
+    using OrderLib for OrderLib.Order;
+
+    // Test addresses
+    address public constant TRADER1 = address(0x1);
+    address public constant TRADER2 = address(0x2);
+    address public constant TRADER3 = address(0x3);
+    
+    // Test data
+    bytes public constant TEST_ENCRYPTED_DATA = "encrypted_order_data_123";
+    bytes public constant TEST_ZK_PROOF = "zk_proof_data_456";
+    uint256 public constant TEST_DEADLINE = 1 hours;
+    uint256 public constant TEST_PRICE = 1800e18;
+    uint256 public constant TEST_AMOUNT = 1000e18;
+    
+    function setUp() public {
+        // Setup test environment
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        ORDER CREATION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_create_order_success() public view {
+        bytes32 orderId = keccak256("test_order_1");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        assertEq(order.id, orderId);
+        assertEq(order.trader, TRADER1);
+        assertEq(order.encryptedData, TEST_ENCRYPTED_DATA);
+        assertEq(order.deadline, deadline);
+        assertEq(order.timestamp, block.timestamp);
+        assertEq(uint(order.status), uint(OrderLib.OrderStatus.Pending));
+        assertEq(order.executedPrice, 0);
+        assertEq(order.zkProof, "");
+    }
+
+    function test_create_order_zero_id() public view {
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            bytes32(0),
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        assertEq(order.id, bytes32(0));
+        assertEq(order.trader, TRADER1);
+    }
+
+    function test_create_order_zero_trader() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            address(0),
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        assertEq(order.trader, address(0));
+    }
+
+    function test_create_order_empty_data() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            "",
+            deadline
+        );
+        
+        assertEq(order.encryptedData, "");
+    }
+
+    function test_create_order_zero_deadline() public view {
+        bytes32 orderId = keccak256("test_order");
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            0
+        );
+        
+        assertEq(order.deadline, 0);
+    }
+
+    function test_create_order_past_deadline() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 pastDeadline = block.timestamp - 1 hours;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            pastDeadline
+        );
+        
+        assertEq(order.deadline, pastDeadline);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        ORDER VALIDATION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_is_valid_order_true() public view {
+        bytes32 orderId = keccak256("valid_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        assertTrue(order.isValid());
+    }
+
+    function test_is_valid_order_zero_id() public view {
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            bytes32(0),
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        assertFalse(order.isValid());
+    }
+
+    function test_is_valid_order_zero_trader() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            address(0),
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        assertFalse(order.isValid());
+    }
+
+    function test_is_valid_order_empty_data() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            "",
+            deadline
+        );
+        
+        assertFalse(order.isValid());
+    }
+
+    function test_is_valid_order_zero_deadline() public view {
+        bytes32 orderId = keccak256("test_order");
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            0
+        );
+        
+        assertFalse(order.isValid());
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        ORDER EXPIRATION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_is_expired_false() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 futureDeadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            futureDeadline
+        );
+        
+        assertFalse(order.isExpired());
+    }
+
+    function test_is_expired_true() public {
+        bytes32 orderId = keccak256("test_order");
+        uint256 pastDeadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            pastDeadline
+        );
+        
+        // Fast forward time
+        vm.warp(pastDeadline + 1);
+        
+        assertTrue(order.isExpired());
+    }
+
+    function test_is_expired_at_deadline() public {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        // Fast forward to exact deadline
+        vm.warp(deadline);
+        
+        assertFalse(order.isExpired()); // Should not be expired at exact deadline
+        
+        // Fast forward 1 second past deadline
+        vm.warp(deadline + 1);
+        
+        assertTrue(order.isExpired()); // Should be expired 1 second past
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        ORDER STATUS TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_is_active_pending() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        assertTrue(order.isActive());
+    }
+
+    function test_is_active_executed() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        order.status = OrderLib.OrderStatus.Executed;
+        assertFalse(order.isActive());
+    }
+
+    function test_is_active_cancelled() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        order.status = OrderLib.OrderStatus.Cancelled;
+        assertFalse(order.isActive());
+    }
+
+    function test_is_active_expired() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        order.status = OrderLib.OrderStatus.Expired;
+        assertFalse(order.isActive());
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        ORDER EXECUTION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_execute_order_success() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        OrderLib.Order memory executedOrder = order.execute(TEST_PRICE, TEST_ZK_PROOF);
+        
+        assertEq(uint(executedOrder.status), uint(OrderLib.OrderStatus.Executed));
+        assertEq(executedOrder.executedPrice, TEST_PRICE);
+        assertEq(executedOrder.zkProof, TEST_ZK_PROOF);
+    }
+
+    function test_execute_order_zero_price() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        OrderLib.Order memory executedOrder = order.execute(0, TEST_ZK_PROOF);
+        
+        assertEq(executedOrder.executedPrice, 0);
+    }
+
+    function test_execute_order_empty_proof() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        OrderLib.Order memory executedOrder = order.execute(TEST_PRICE, "");
+        
+        assertEq(executedOrder.zkProof, "");
+    }
+
+    function test_execute_order_multiple_times() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        // First execution
+        OrderLib.Order memory executedOrder1 = order.execute(TEST_PRICE, TEST_ZK_PROOF);
+        assertEq(executedOrder1.executedPrice, TEST_PRICE);
+        
+        // Second execution (should overwrite)
+        OrderLib.Order memory executedOrder2 = executedOrder1.execute(TEST_PRICE + 100e18, "new_proof");
+        assertEq(executedOrder2.executedPrice, TEST_PRICE + 100e18);
+        assertEq(executedOrder2.zkProof, "new_proof");
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        ORDER CANCELLATION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_cancel_order_success() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        OrderLib.Order memory cancelledOrder = order.cancel();
+        
+        assertEq(uint(cancelledOrder.status), uint(OrderLib.OrderStatus.Cancelled));
+        assertFalse(cancelledOrder.isActive());
+    }
+
+    function test_cancel_order_already_executed() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        // Execute first
+        OrderLib.Order memory executedOrder = order.execute(TEST_PRICE, TEST_ZK_PROOF);
+        
+        // Then cancel
+        OrderLib.Order memory cancelledOrder = executedOrder.cancel();
+        
+        // Should still be cancelled
+        assertEq(uint(cancelledOrder.status), uint(OrderLib.OrderStatus.Cancelled));
+    }
+
+    function test_cancel_order_already_cancelled() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        // Cancel first
+        OrderLib.Order memory cancelledOrder1 = order.cancel();
+        
+        // Cancel again
+        OrderLib.Order memory cancelledOrder2 = cancelledOrder1.cancel();
+        
+        assertEq(uint(cancelledOrder2.status), uint(OrderLib.OrderStatus.Cancelled));
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        ORDER EXPIRY TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_expire_order_success() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        OrderLib.Order memory expiredOrder = order.expire();
+        
+        assertEq(uint(expiredOrder.status), uint(OrderLib.OrderStatus.Expired));
+        assertFalse(expiredOrder.isActive());
+    }
+
+    function test_expire_order_already_executed() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        // Execute first
+        OrderLib.Order memory executedOrder = order.execute(TEST_PRICE, TEST_ZK_PROOF);
+        
+        // Then expire
+        OrderLib.Order memory expiredOrder = executedOrder.expire();
+        
+        // Should still be expired
+        assertEq(uint(expiredOrder.status), uint(OrderLib.OrderStatus.Expired));
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        ORDER HASHING TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_hash_order_consistent() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        bytes32 hash1 = order.hash();
+        bytes32 hash2 = order.hash();
+        
+        assertEq(hash1, hash2);
+        assertTrue(hash1 != bytes32(0));
+    }
+
+    function test_hash_order_different_orders() public view {
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order1 = OrderLib.createOrder(
+            keccak256("order_1"),
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        OrderLib.Order memory order2 = OrderLib.createOrder(
+            keccak256("order_2"),
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        bytes32 hash1 = order1.hash();
+        bytes32 hash2 = order2.hash();
+        
+        assertTrue(hash1 != hash2);
+    }
+
+    function test_hash_order_different_traders() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order1 = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        OrderLib.Order memory order2 = OrderLib.createOrder(
+            orderId,
+            TRADER2,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        bytes32 hash1 = order1.hash();
+        bytes32 hash2 = order2.hash();
+        
+        assertTrue(hash1 != hash2);
+    }
+
+    function test_hash_order_different_data() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order1 = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            "data_1",
+            deadline
+        );
+        
+        OrderLib.Order memory order2 = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            "data_2",
+            deadline
+        );
+        
+        bytes32 hash1 = order1.hash();
+        bytes32 hash2 = order2.hash();
+        
+        assertTrue(hash1 != hash2);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        COMMITMENT HASH TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_commitment_hash_consistent() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        uint256 nonce = 12345;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        bytes32 commitment1 = order.getCommitmentHash(nonce);
+        bytes32 commitment2 = order.getCommitmentHash(nonce);
+        
+        assertEq(commitment1, commitment2);
+        assertTrue(commitment1 != bytes32(0));
+    }
+
+    function test_commitment_hash_different_nonce() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        bytes32 commitment1 = order.getCommitmentHash(123);
+        bytes32 commitment2 = order.getCommitmentHash(456);
+        
+        assertTrue(commitment1 != commitment2);
+    }
+
+    function test_commitment_hash_zero_nonce() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        bytes32 commitment = order.getCommitmentHash(0);
+        assertTrue(commitment != bytes32(0));
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        SERIALIZATION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_serialize_order() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        bytes memory serialized = order.serialize();
+        assertTrue(serialized.length > 0);
+    }
+
+    function test_serialize_order_with_execution() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        OrderLib.Order memory executedOrder = order.execute(TEST_PRICE, TEST_ZK_PROOF);
+        
+        bytes memory serialized = executedOrder.serialize();
+        assertTrue(serialized.length > 0);
+    }
+
+    function test_serialize_order_different_orders() public view {
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order1 = OrderLib.createOrder(
+            keccak256("order_1"),
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        OrderLib.Order memory order2 = OrderLib.createOrder(
+            keccak256("order_2"),
+            TRADER2,
+            "different_data",
+            deadline + 1 hours
+        );
+        
+        bytes memory serialized1 = order1.serialize();
+        bytes memory serialized2 = order2.serialize();
+        
+        assertTrue(keccak256(serialized1) != keccak256(serialized2));
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        ORDER MATCHING TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_create_match_success() public view {
+        bytes32 buyOrderId = keccak256("buy_order");
+        bytes32 sellOrderId = keccak256("sell_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory buyOrder = OrderLib.createOrder(
+            buyOrderId,
+            TRADER1,
+            "buy_data",
+            deadline
+        );
+        
+        OrderLib.Order memory sellOrder = OrderLib.createOrder(
+            sellOrderId,
+            TRADER2,
+            "sell_data",
+            deadline
+        );
+        
+        uint256 matchedAmount = OrderLib.calculateMatchedAmount(buyOrder.amount, sellOrder.amount);
+        uint256 executionPrice = OrderLib.calculateExecutionPrice(buyOrder.price, sellOrder.price);
+        
+        OrderLib.MatchResult memory matchResult = OrderLib.createMatchResult(
+            buyOrder,
+            sellOrder,
+            matchedAmount,
+            executionPrice
+        );
+        
+        assertEq(matchResult.buyOrderId, buyOrderId);
+        assertEq(matchResult.sellOrderId, sellOrderId);
+        assertEq(matchResult.executionPrice, executionPrice);
+        assertEq(matchResult.matchedAmount, matchedAmount);
+        assertEq(matchResult.timestamp, block.timestamp);
+        assertTrue(matchResult.matchHash != bytes32(0));
+    }
+
+    function test_create_match_same_order() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        uint256 matchedAmount = OrderLib.calculateMatchedAmount(order.amount, order.amount);
+        uint256 executionPrice = TEST_PRICE;
+        
+        OrderLib.MatchResult memory matchResult = OrderLib.createMatchResult(
+            order,
+            order,
+            matchedAmount,
+            executionPrice
+        );
+        
+        // Should still create match even with same order
+        assertEq(matchResult.buyOrderId, orderId);
+        assertEq(matchResult.sellOrderId, orderId);
+        assertTrue(matchResult.matchHash != bytes32(0));
+    }
+
+    function test_create_match_zero_price() public view {
+        bytes32 buyOrderId = keccak256("buy_order");
+        bytes32 sellOrderId = keccak256("sell_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory buyOrder = OrderLib.createOrder(
+            buyOrderId,
+            TRADER1,
+            "buy_data",
+            deadline
+        );
+        
+        OrderLib.Order memory sellOrder = OrderLib.createOrder(
+            sellOrderId,
+            TRADER2,
+            "sell_data",
+            deadline
+        );
+        
+        uint256 matchedAmount = OrderLib.calculateMatchedAmount(buyOrder.amount, sellOrder.amount);
+        uint256 executionPrice = 0;
+        
+        OrderLib.MatchResult memory matchResult = OrderLib.createMatchResult(
+            buyOrder,
+            sellOrder,
+            matchedAmount,
+            executionPrice
+        );
+        
+        assertEq(matchResult.executionPrice, 0);
+        assertTrue(matchResult.matchHash != bytes32(0));
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        UTILITY FUNCTIONS TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_get_order_age() public {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        uint256 age = order.getAge();
+        assertEq(age, 0); // Just created
+        
+        // Fast forward time
+        vm.warp(block.timestamp + 1 hours);
+        
+        age = order.getAge();
+        assertEq(age, 1 hours);
+    }
+
+    function test_get_time_to_expiry() public {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        uint256 timeToExpiry = order.getTimeToExpiry();
+        assertEq(timeToExpiry, TEST_DEADLINE);
+        
+        // Fast forward time
+        vm.warp(block.timestamp + 30 minutes);
+        
+        timeToExpiry = order.getTimeToExpiry();
+        assertEq(timeToExpiry, TEST_DEADLINE - 30 minutes);
+    }
+
+    function test_get_time_to_expiry_expired() public {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        // Fast forward past deadline
+        vm.warp(deadline + 1);
+        
+        uint256 timeToExpiry = order.getTimeToExpiry();
+        assertEq(timeToExpiry, 0); // Should return 0 for expired orders
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        EDGE CASE TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_maximum_deadline() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 maxDeadline = type(uint256).max;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            maxDeadline
+        );
+        
+        assertEq(order.deadline, maxDeadline);
+        assertFalse(order.isExpired());
+    }
+
+    function test_maximum_data_size() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        // Create large data (1KB)
+        bytes memory largeData = new bytes(1024);
+        for (uint i = 0; i < 1024; i++) {
+            largeData[i] = bytes1(uint8(i % 256));
+        }
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            largeData,
+            deadline
+        );
+        
+        assertEq(order.encryptedData.length, 1024);
+        assertTrue(order.isValid());
+    }
+
+    function test_maximum_price() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        uint256 maxPrice = type(uint256).max;
+        OrderLib.Order memory executedOrder = order.execute(maxPrice, TEST_ZK_PROOF);
+        
+        assertEq(executedOrder.executedPrice, maxPrice);
+    }
+
+    function test_order_status_transitions() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        // Initial state: Pending
+        assertEq(uint(order.status), uint(OrderLib.OrderStatus.Pending));
+        assertTrue(order.isActive());
+        
+        // Execute -> Executed
+        OrderLib.Order memory executedOrder = order.execute(TEST_PRICE, TEST_ZK_PROOF);
+        assertEq(uint(executedOrder.status), uint(OrderLib.OrderStatus.Executed));
+        assertFalse(executedOrder.isActive());
+        
+        // Cancel executed order -> Cancelled
+        OrderLib.Order memory cancelledOrder = executedOrder.cancel();
+        assertEq(uint(cancelledOrder.status), uint(OrderLib.OrderStatus.Cancelled));
+        assertFalse(cancelledOrder.isActive());
+        
+        // Expire cancelled order -> Expired
+        OrderLib.Order memory expiredOrder = cancelledOrder.expire();
+        assertEq(uint(expiredOrder.status), uint(OrderLib.OrderStatus.Expired));
+        assertFalse(expiredOrder.isActive());
+    }
+
+    function test_concurrent_order_operations() public view {
+        bytes32[] memory orderIds = new bytes32[](100);
+        OrderLib.Order[] memory orders = new OrderLib.Order[](100);
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        // Create many orders
+        for (uint i = 0; i < 100; i++) {
+            orderIds[i] = keccak256(abi.encode("order", i));
+            orders[i] = OrderLib.createOrder(
+                orderIds[i],
+                address(uint160(i + 1)),
+                abi.encodePacked("data", i),
+                deadline
+            );
+            
+            assertTrue(orders[i].isValid());
+            assertEq(orders[i].id, orderIds[i]);
+        }
+        
+        // Execute all orders
+        for (uint i = 0; i < 100; i++) {
+            orders[i] = orders[i].execute(TEST_PRICE + i, abi.encodePacked("proof", i));
+            assertEq(uint(orders[i].status), uint(OrderLib.OrderStatus.Executed));
+        }
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        GAS EFFICIENCY TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_order_creation_gas_efficiency() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        uint256 gasStart = gasleft();
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        uint256 gasUsed = gasStart - gasleft();
+        
+        console.log("Order creation gas used:", gasUsed);
+        assertLt(gasUsed, 50000); // Should be very efficient
+        assertTrue(order.isValid());
+    }
+
+    function test_order_hashing_gas_efficiency() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        uint256 gasStart = gasleft();
+        bytes32 orderHash = order.hash();
+        uint256 gasUsed = gasStart - gasleft();
+        
+        console.log("Order hashing gas used:", gasUsed);
+        assertLt(gasUsed, 20000); // Should be very efficient
+        assertTrue(orderHash != bytes32(0));
+    }
+
+    function test_order_serialization_gas_efficiency() public view {
+        bytes32 orderId = keccak256("test_order");
+        uint256 deadline = block.timestamp + TEST_DEADLINE;
+        
+        OrderLib.Order memory order = OrderLib.createOrder(
+            orderId,
+            TRADER1,
+            TEST_ENCRYPTED_DATA,
+            deadline
+        );
+        
+        uint256 gasStart = gasleft();
+        bytes memory serialized = order.serialize();
+        uint256 gasUsed = gasStart - gasleft();
+        
+        console.log("Order serialization gas used:", gasUsed);
+        assertLt(gasUsed, 30000); // Should be efficient
+        assertTrue(serialized.length > 0);
+    }
+}

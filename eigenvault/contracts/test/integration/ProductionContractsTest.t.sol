@@ -6,6 +6,7 @@ import "../../src/vault/OrderVault.sol";
 import "../../src/hooks/EigenVaultHook.sol";
 import "../hooks/MockPoolManager.sol";
 import "../core/MockERC20.sol";
+import "../core/MockEigenVaultAVS.sol";
 
 /// @title ProductionContractsTest
 /// @notice Test to verify our production contracts compile and basic functionality works
@@ -15,6 +16,7 @@ contract ProductionContractsTest is Test {
     MockPoolManager public poolManager;
     MockERC20 public token0;
     MockERC20 public token1;
+    MockEigenVaultAVS public mockAVS;
     
     address public trader1 = address(0x1);
     address public hook = address(0x2);
@@ -24,15 +26,16 @@ contract ProductionContractsTest is Test {
         poolManager = new MockPoolManager();
         token0 = new MockERC20("Token0", "T0", 18);
         token1 = new MockERC20("Token1", "T1", 18);
+        mockAVS = new MockEigenVaultAVS();
         
         // Deploy OrderVault
         orderVault = new OrderVault();
         
-        // Deploy EigenVaultHook (without ServiceManager for now)
+        // Deploy EigenVaultHook with mock AVS
         eigenVaultHook = new EigenVaultHook(
             IPoolManager(address(poolManager)),
             address(orderVault), 
-            address(0) // No service manager
+            address(mockAVS)
         );
         
         // Setup authorizations

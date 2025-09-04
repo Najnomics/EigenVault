@@ -2,20 +2,20 @@
 src = "contracts/src"
 out = "contracts/out"
 test = "contracts/test"
-libs = ["lib"]
+libs = ["contracts/lib"]
 solc_version = "0.8.26"
 evm_version = "cancun"
-optimizer_runs = 800
-via_ir = false
+optimizer_runs = 10000
+via_ir = true
 ffi = true
 
 remappings = [
-    "@eigenlayer/=lib/eigenlayer-contracts/src/contracts/",
-    "@eigenlayer-middleware/=lib/eigenlayer-middleware/src/",
-    "@uniswap/v4-core/=lib/v4-core/",
-    "@uniswap/v4-periphery/=lib/v4-periphery/",
-    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
-    "@forge-std/=lib/forge-std/src/",
+    "@eigenlayer/=contracts/lib/eigenlayer-contracts/src/contracts/",
+    "@eigenlayer-middleware/=contracts/lib/eigenlayer-middleware/src/",
+    "@uniswap/v4-core/=contracts/lib/v4-core/",
+    "@uniswap/v4-periphery/=contracts/lib/v4-periphery/",
+    "@openzeppelin/contracts/=contracts/lib/openzeppelin-contracts/contracts/",
+    "@forge-std/=contracts/lib/forge-std/src/",
 
 ]
 

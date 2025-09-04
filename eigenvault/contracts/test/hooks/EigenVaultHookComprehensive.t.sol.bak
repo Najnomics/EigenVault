@@ -1,0 +1,894 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.26;
+
+import {Test} from "forge-std/Test.sol";
+import {console} from "forge-std/console.sol";
+import {EigenVaultHook} from "../../src/hooks/EigenVaultHook.sol";
+import {IEigenVaultHook} from "../../src/hooks/IEigenVaultHook.sol";
+import {OrderVault} from "../../src/vault/OrderVault.sol";
+import {IOrderVault} from "../../src/vault/IOrderVault.sol";
+import {EigenVaultAVS} from "../../src/avs/EigenVaultAVS.sol";
+import {IEigenVaultAVS} from "../../src/avs/IEigenVaultAVS.sol";
+import {OrderLib} from "../../src/vault/OrderLib.sol";
+import {ZKProofLib} from "../../src/core/ZKProofLib.sol";
+import {SecurityLib} from "../../src/core/SecurityLib.sol";
+import {MockPoolManager} from "./MockPoolManager.sol";
+import {MockERC20} from "../core/MockERC20.sol";
+
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
+import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
+import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+
+/// @title EigenVaultHookComprehensive
+/// @notice Comprehensive test suite for EigenVaultHook contract covering all functionalities
+contract EigenVaultHookComprehensiveTest is Test {
+    using CurrencyLibrary for Currency;
+    using BeforeSwapDeltaLibrary for BeforeSwapDelta;
+
+    // Test contracts
+    EigenVaultHook public eigenVaultHook;
+    OrderVault public orderVault;
+    EigenVaultAVS public eigenVaultAVS;
+    MockPoolManager public poolManager;
+    MockERC20 public token0;
+    MockERC20 public token1;
+
+    // Test addresses
+    address public owner = address(this);
+    address public trader1 = address(0x1);
+    address public trader2 = address(0x2);
+    address public trader3 = address(0x3);
+    address public operator1 = address(0x101);
+    address public operator2 = address(0x102);
+    address public operator3 = address(0x103);
+    address public aggregator = address(0x201);
+    address public maliciousUser = address(0x666);
+
+    // Test constants
+    uint256 public constant INITIAL_BALANCE = 1000000 ether;
+    uint256 public constant TEST_AMOUNT = 1000 ether;
+    uint256 public constant LARGE_ORDER_THRESHOLD = 100 ether;
+    uint32 public constant TEST_TASK_INDEX = 1;
+    
+    // Test pool key
+    PoolKey public testPoolKey;
+    
+    // Events for testing
+    event VaultOrderCreated(bytes32 indexed orderId, address indexed trader, uint256 amount, bool zeroForOne);
+    event OrderRoutedToVault(address indexed trader, bytes32 indexed orderId, PoolKey indexed key, bool zeroForOne, int256 amountSpecified, bytes32 commitment);
+    event VaultOrderExecuted(PoolKey indexed poolKey, uint256 amountIn, uint256 expectedAmountOut, uint256 actualAmount0, uint256 actualAmount1, bool zeroForOne);
+    event OrderMatched(bytes32 indexed orderId, address indexed trader, uint256 executionPrice, uint256 matchedAmount);
+    event VaultThresholdUpdated(uint256 oldThreshold, uint256 newThreshold);
+    event PoolThresholdUpdated(bytes32 indexed poolId, uint256 oldThreshold, uint256 newThreshold);
+    event SecurityCheckFailed(bytes32 indexed orderId, uint256 riskScore, string reason);
+    event EmergencyPauseActivated(string reason, uint256 timestamp);
+    event EmergencyPauseDeactivated(uint256 timestamp);
+    
+    function setUp() public {
+        // Deploy mock contracts
+        poolManager = new MockPoolManager();
+        token0 = new MockERC20("Token0", "T0", 18);
+        token1 = new MockERC20("Token1", "T1", 18);
+        
+        // Deploy core contracts
+        orderVault = new OrderVault();
+        eigenVaultAVS = new EigenVaultAVS();
+        
+        // Initialize mock pool
+        testPoolKey = PoolKey({
+            currency0: Currency.wrap(address(token0)),
+            currency1: Currency.wrap(address(token1)),
+            fee: 3000,
+            tickSpacing: 60,
+            hooks: IHooks(address(0)) // Will be set after hook deployment
+        });
+        
+        bytes32 poolId = keccak256(abi.encode(testPoolKey));
+        poolManager.initialize(poolId, 1771595571142957166656628962687); // Mock sqrt price
+        
+        // Deploy EigenVaultHook
+        eigenVaultHook = new EigenVaultHook(
+            IPoolManager(address(poolManager)),
+            address(orderVault),
+            address(eigenVaultAVS)
+        );
+        
+        // Update pool key with hook address
+        testPoolKey.hooks = IHooks(address(eigenVaultHook));
+        
+        // Setup authorizations
+        orderVault.authorizeHook(address(eigenVaultHook), true);
+        eigenVaultAVS.registerOperator(operator1, "operator1");
+        eigenVaultAVS.registerOperator(operator2, "operator2");
+        eigenVaultAVS.registerOperator(operator3, "operator3");
+        
+        // Setup token balances
+        _setupTokenBalances();
+        
+        // Set appropriate vault threshold for testing
+        eigenVaultHook.updateVaultThreshold(1000); // 10%
+    }
+
+    function _setupTokenBalances() internal {
+        token0.mint(trader1, INITIAL_BALANCE);
+        token0.mint(trader2, INITIAL_BALANCE);
+        token0.mint(trader3, INITIAL_BALANCE);
+        token0.mint(maliciousUser, INITIAL_BALANCE);
+        
+        token1.mint(trader1, INITIAL_BALANCE);
+        token1.mint(trader2, INITIAL_BALANCE);
+        token1.mint(trader3, INITIAL_BALANCE);
+        token1.mint(maliciousUser, INITIAL_BALANCE);
+        
+        // Approve hook for spending
+        vm.startPrank(trader1);
+        token0.approve(address(eigenVaultHook), type(uint256).max);
+        token1.approve(address(eigenVaultHook), type(uint256).max);
+        vm.stopPrank();
+        
+        vm.startPrank(trader2);
+        token0.approve(address(eigenVaultHook), type(uint256).max);
+        token1.approve(address(eigenVaultHook), type(uint256).max);
+        vm.stopPrank();
+        
+        vm.startPrank(trader3);
+        token0.approve(address(eigenVaultHook), type(uint256).max);
+        token1.approve(address(eigenVaultHook), type(uint256).max);
+        vm.stopPrank();
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            DEPLOYMENT TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_deployment_success() public view {
+        assertEq(address(eigenVaultHook.poolManager()), address(poolManager));
+        assertEq(eigenVaultHook.ORDER_VAULT(), address(orderVault));
+        assertEq(address(eigenVaultHook.EIGEN_VAULT_AVS()), address(eigenVaultAVS));
+        assertEq(eigenVaultHook.owner(), owner);
+        assertEq(eigenVaultHook.vaultThresholdBps(), 1000);
+    }
+
+    function test_deployment_invalid_pool_manager() public {
+        vm.expectRevert();
+        new EigenVaultHook(
+            IPoolManager(address(0)),
+            address(orderVault),
+            address(eigenVaultAVS)
+        );
+    }
+
+    function test_deployment_invalid_order_vault() public {
+        vm.expectRevert("Invalid order vault address");
+        new EigenVaultHook(
+            IPoolManager(address(poolManager)),
+            address(0),
+            address(eigenVaultAVS)
+        );
+    }
+
+    function test_deployment_invalid_avs() public {
+        vm.expectRevert("Invalid EigenVault AVS address");
+        new EigenVaultHook(
+            IPoolManager(address(poolManager)),
+            address(orderVault),
+            address(0)
+        );
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                          HOOK PERMISSIONS TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_hook_permissions_correct() public view {
+        Hooks.Permissions memory permissions = eigenVaultHook.getHookPermissions();
+        assertTrue(permissions.beforeSwap);
+        assertTrue(permissions.afterSwap);
+        assertFalse(permissions.beforeInitialize);
+        assertFalse(permissions.afterInitialize);
+        assertFalse(permissions.beforeAddLiquidity);
+        assertFalse(permissions.afterAddLiquidity);
+        assertFalse(permissions.beforeRemoveLiquidity);
+        assertFalse(permissions.afterRemoveLiquidity);
+        assertFalse(permissions.beforeDonate);
+        assertFalse(permissions.afterDonate);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        THRESHOLD MANAGEMENT TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_update_vault_threshold_success() public {
+        uint256 oldThreshold = eigenVaultHook.vaultThresholdBps();
+        uint256 newThreshold = 500;
+
+        vm.expectEmit(true, true, true, true);
+        emit VaultThresholdUpdated(oldThreshold, newThreshold);
+        
+        eigenVaultHook.updateVaultThreshold(newThreshold);
+        assertEq(eigenVaultHook.vaultThresholdBps(), newThreshold);
+    }
+
+    function test_update_vault_threshold_only_owner() public {
+        vm.startPrank(trader1);
+        vm.expectRevert();
+        eigenVaultHook.updateVaultThreshold(500);
+        vm.stopPrank();
+    }
+
+    function test_update_vault_threshold_zero() public {
+        eigenVaultHook.updateVaultThreshold(0);
+        assertEq(eigenVaultHook.vaultThresholdBps(), 0);
+    }
+
+    function test_update_vault_threshold_maximum() public {
+        eigenVaultHook.updateVaultThreshold(10000); // 100%
+        assertEq(eigenVaultHook.vaultThresholdBps(), 10000);
+    }
+
+    function test_update_pool_threshold_success() public {
+        bytes32 poolId = keccak256(abi.encode(testPoolKey));
+        uint256 newThreshold = 200;
+
+        vm.expectEmit(true, true, true, true);
+        emit PoolThresholdUpdated(poolId, 0, newThreshold);
+        
+        eigenVaultHook.updatePoolThreshold(testPoolKey, newThreshold);
+        assertEq(eigenVaultHook.poolThresholds(poolId), newThreshold);
+    }
+
+    function test_update_pool_threshold_only_owner() public {
+        vm.startPrank(trader1);
+        vm.expectRevert();
+        eigenVaultHook.updatePoolThreshold(testPoolKey, 200);
+        vm.stopPrank();
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        ORDER SIZE DETECTION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_is_large_order_above_threshold() public view {
+        uint256 largeAmount = TEST_AMOUNT;
+        bool isLarge = eigenVaultHook.isLargeOrder(largeAmount, testPoolKey);
+        assertTrue(isLarge);
+    }
+
+    function test_is_large_order_below_threshold() public view {
+        uint256 smallAmount = 1 ether;
+        bool isLarge = eigenVaultHook.isLargeOrder(smallAmount, testPoolKey);
+        assertFalse(isLarge);
+    }
+
+    function test_is_large_order_at_threshold() public {
+        // Set threshold to exactly match test amount
+        eigenVaultHook.updateVaultThreshold(100); // 1%
+        
+        // Get pool liquidity and calculate threshold amount
+        bytes32 poolId = keccak256(abi.encode(testPoolKey));
+        uint256 poolLiquidity = poolManager.poolLiquidity(poolId);
+        uint256 thresholdAmount = (poolLiquidity * 100) / 10000;
+        
+        bool isLarge = eigenVaultHook.isLargeOrder(thresholdAmount, testPoolKey);
+        assertTrue(isLarge);
+        
+        bool isNotLarge = eigenVaultHook.isLargeOrder(thresholdAmount - 1, testPoolKey);
+        assertFalse(isNotLarge);
+    }
+
+    function test_is_large_order_with_pool_specific_threshold() public {
+        // Set pool-specific threshold
+        bytes32 poolId = keccak256(abi.encode(testPoolKey));
+        eigenVaultHook.updatePoolThreshold(testPoolKey, 2000); // 20%
+        
+        uint256 poolLiquidity = poolManager.poolLiquidity(poolId);
+        uint256 thresholdAmount = (poolLiquidity * 2000) / 10000;
+        
+        bool isLarge = eigenVaultHook.isLargeOrder(thresholdAmount, testPoolKey);
+        assertTrue(isLarge);
+        
+        bool isNotLarge = eigenVaultHook.isLargeOrder(thresholdAmount - 1, testPoolKey);
+        assertFalse(isNotLarge);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           BEFORE SWAP TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_before_swap_small_order_passthrough() public {
+        SwapParams memory params = SwapParams({
+            zeroForOne: true,
+            amountSpecified: int256(1 ether),
+            sqrtPriceLimitX96: 0
+        });
+        
+        bytes memory hookData = abi.encode("small_order");
+        
+        bytes4 result = eigenVaultHook.beforeSwap(
+            trader1,
+            testPoolKey,
+            params,
+            hookData
+        );
+        
+        assertEq(result, eigenVaultHook.beforeSwap.selector);
+    }
+
+    function test_before_swap_large_order_to_vault() public {
+        SwapParams memory params = SwapParams({
+            zeroForOne: true,
+            amountSpecified: int256(TEST_AMOUNT),
+            sqrtPriceLimitX96: 0
+        });
+        
+        bytes memory hookData = abi.encode("large_order", block.timestamp + 1 hours);
+        
+        vm.expectEmit(true, true, false, true);
+        emit VaultOrderCreated(bytes32(0), trader1, uint256(params.amountSpecified), params.zeroForOne);
+        
+        bytes4 result = eigenVaultHook.beforeSwap(
+            trader1,
+            testPoolKey,
+            params,
+            hookData
+        );
+        
+        // Should return skip selector for large orders routed to vault
+        assertEq(result, bytes4(0));
+    }
+
+    function test_before_swap_negative_amount_specified() public {
+        SwapParams memory params = SwapParams({
+            zeroForOne: false,
+            amountSpecified: -int256(TEST_AMOUNT),
+            sqrtPriceLimitX96: 0
+        });
+        
+        bytes memory hookData = abi.encode("large_order", block.timestamp + 1 hours);
+        
+        vm.expectEmit(true, true, false, true);
+        emit VaultOrderCreated(bytes32(0), trader1, uint256(-params.amountSpecified), params.zeroForOne);
+        
+        eigenVaultHook.beforeSwap(
+            trader1,
+            testPoolKey,
+            params,
+            hookData
+        );
+    }
+
+    function test_before_swap_zero_amount() public {
+        SwapParams memory params = SwapParams({
+            zeroForOne: true,
+            amountSpecified: 0,
+            sqrtPriceLimitX96: 0
+        });
+        
+        bytes memory hookData = "";
+        
+        bytes4 result = eigenVaultHook.beforeSwap(
+            trader1,
+            testPoolKey,
+            params,
+            hookData
+        );
+        
+        assertEq(result, eigenVaultHook.beforeSwap.selector);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            AFTER SWAP TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_after_swap_success() public {
+        SwapParams memory params = SwapParams({
+            zeroForOne: true,
+            amountSpecified: int256(TEST_AMOUNT),
+            sqrtPriceLimitX96: 0
+        });
+        
+        BalanceDelta delta = BalanceDelta.wrap(int256(TEST_AMOUNT));
+        
+        bytes4 result = eigenVaultHook.afterSwap(
+            trader1,
+            testPoolKey,
+            params,
+            delta,
+            ""
+        );
+        
+        assertEq(result, eigenVaultHook.afterSwap.selector);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                         VAULT ORDER EXECUTION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_execute_vault_order_success() public {
+        // First create a vault order
+        bytes32 orderId = _createTestVaultOrder();
+        
+        // Execute the order
+        vm.startPrank(address(eigenVaultAVS));
+        eigenVaultHook.executeVaultOrder(orderId, 1800e18, abi.encode("zkproof"));
+        vm.stopPrank();
+        
+        // Check order is executed
+        (,,,,, bool executed,) = eigenVaultHook.vaultOrders(orderId);
+        assertTrue(executed);
+    }
+
+    function test_execute_vault_order_only_avs() public {
+        bytes32 orderId = _createTestVaultOrder();
+        
+        vm.startPrank(trader1);
+        vm.expectRevert("Only EigenVault AVS");
+        eigenVaultHook.executeVaultOrder(orderId, 1800e18, abi.encode("zkproof"));
+        vm.stopPrank();
+    }
+
+    function test_execute_vault_order_nonexistent() public {
+        bytes32 nonexistentOrderId = keccak256("nonexistent");
+        
+        vm.startPrank(address(eigenVaultAVS));
+        vm.expectRevert("Order not found");
+        eigenVaultHook.executeVaultOrder(nonexistentOrderId, 1800e18, abi.encode("zkproof"));
+        vm.stopPrank();
+    }
+
+    function test_execute_vault_order_already_executed() public {
+        bytes32 orderId = _createTestVaultOrder();
+        
+        // Execute once
+        vm.startPrank(address(eigenVaultAVS));
+        eigenVaultHook.executeVaultOrder(orderId, 1800e18, abi.encode("zkproof"));
+        
+        // Try to execute again
+        vm.expectRevert("Order already executed");
+        eigenVaultHook.executeVaultOrder(orderId, 1800e18, abi.encode("zkproof"));
+        vm.stopPrank();
+    }
+
+    function test_execute_vault_order_expired() public {
+        bytes32 orderId = _createTestVaultOrder();
+        
+        // Fast forward past deadline
+        vm.warp(block.timestamp + 2 hours);
+        
+        vm.startPrank(address(eigenVaultAVS));
+        vm.expectRevert("Order expired");
+        eigenVaultHook.executeVaultOrder(orderId, 1800e18, abi.encode("zkproof"));
+        vm.stopPrank();
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           FALLBACK AMM TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_fallback_to_amm_success() public {
+        bytes32 orderId = _createTestVaultOrder();
+        
+        vm.expectEmit(false, false, false, false);
+        
+        eigenVaultHook.fallbackToAMM(orderId);
+        
+        // Check order is marked as executed
+        (,,,,, bool executed,) = eigenVaultHook.vaultOrders(orderId);
+        assertTrue(executed);
+    }
+
+    function test_fallback_to_amm_nonexistent_order() public {
+        bytes32 nonexistentOrderId = keccak256("nonexistent");
+        
+        vm.expectRevert("Order not found");
+        eigenVaultHook.fallbackToAMM(nonexistentOrderId);
+    }
+
+    function test_fallback_to_amm_already_executed() public {
+        bytes32 orderId = _createTestVaultOrder();
+        
+        // Execute first
+        vm.startPrank(address(eigenVaultAVS));
+        eigenVaultHook.executeVaultOrder(orderId, 1800e18, abi.encode("zkproof"));
+        vm.stopPrank();
+        
+        // Try fallback
+        vm.expectRevert("Order already executed");
+        eigenVaultHook.fallbackToAMM(orderId);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                         SECURITY CONFIGURATION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_update_security_config_success() public {
+        SecurityLib.SecurityConfig memory newConfig = SecurityLib.SecurityConfig({
+            maxOrderSize: 20000e18,
+            maxPoolExposure: 200000e18,
+            maxSlippageBps: 1000,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: 0,
+            securityCheckInterval: 2 hours
+        });
+        
+        eigenVaultHook.updateSecurityConfig(newConfig);
+        
+        SecurityLib.SecurityConfig memory updatedConfig = eigenVaultHook.securityConfig();
+        assertEq(updatedConfig.maxOrderSize, newConfig.maxOrderSize);
+        assertEq(updatedConfig.maxPoolExposure, newConfig.maxPoolExposure);
+        assertEq(updatedConfig.maxSlippageBps, newConfig.maxSlippageBps);
+        assertEq(updatedConfig.emergencyPauseThreshold, newConfig.emergencyPauseThreshold);
+    }
+
+    function test_update_security_config_only_owner() public {
+        SecurityLib.SecurityConfig memory newConfig = SecurityLib.SecurityConfig({
+            maxOrderSize: 20000e18,
+            maxPoolExposure: 200000e18,
+            maxSlippageBps: 1000,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: 0,
+            securityCheckInterval: 2 hours
+        });
+        
+        vm.startPrank(trader1);
+        vm.expectRevert();
+        eigenVaultHook.updateSecurityConfig(newConfig);
+        vm.stopPrank();
+    }
+
+    function test_emergency_pause_activation() public {
+        vm.expectEmit(false, false, false, true);
+        emit EmergencyPauseActivated("High risk detected", block.timestamp);
+        
+        eigenVaultHook.activateEmergencyPause("High risk detected");
+        
+        SecurityLib.SecurityConfig memory config = eigenVaultHook.securityConfig();
+        assertTrue(config.emergencyPaused);
+    }
+
+    function test_emergency_pause_deactivation() public {
+        // First activate
+        eigenVaultHook.activateEmergencyPause("Test pause");
+        
+        // Then deactivate
+        vm.expectEmit(false, false, false, true);
+        emit EmergencyPauseDeactivated(block.timestamp);
+        
+        eigenVaultHook.deactivateEmergencyPause();
+        
+        SecurityLib.SecurityConfig memory config = eigenVaultHook.securityConfig();
+        assertFalse(config.emergencyPaused);
+    }
+
+    function test_emergency_pause_only_owner() public {
+        vm.startPrank(trader1);
+        vm.expectRevert();
+        eigenVaultHook.activateEmergencyPause("Unauthorized");
+        vm.stopPrank();
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        GAS OPTIMIZATION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_update_gas_optimization_success() public {
+        EigenVaultHook.GasOptimization memory newOptimization = EigenVaultHook.GasOptimization({
+            enableBatchProcessing: true,
+            maxBatchSize: 20,
+            enableCompression: false,
+            gasPriceLimit: 200 gwei
+        });
+        
+        eigenVaultHook.updateGasOptimization(newOptimization);
+        
+        EigenVaultHook.GasOptimization memory updated = eigenVaultHook.gasOptimization();
+        assertEq(updated.maxBatchSize, 20);
+        assertEq(updated.gasPriceLimit, 200 gwei);
+        assertFalse(updated.enableCompression);
+    }
+
+    function test_update_gas_optimization_only_owner() public {
+        EigenVaultHook.GasOptimization memory newOptimization = EigenVaultHook.GasOptimization({
+            enableBatchProcessing: true,
+            maxBatchSize: 20,
+            enableCompression: false,
+            gasPriceLimit: 200 gwei
+        });
+        
+        vm.startPrank(trader1);
+        vm.expectRevert();
+        eigenVaultHook.updateGasOptimization(newOptimization);
+        vm.stopPrank();
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                         BATCH PROCESSING TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_batch_process_orders_success() public {
+        bytes32[] memory orderIds = new bytes32[](3);
+        orderIds[0] = _createTestVaultOrder();
+        orderIds[1] = _createTestVaultOrder2();
+        orderIds[2] = _createTestVaultOrder3();
+        
+        uint256[] memory executionPrices = new uint256[](3);
+        executionPrices[0] = 1800e18;
+        executionPrices[1] = 1790e18;
+        executionPrices[2] = 1810e18;
+        
+        bytes[] memory zkProofs = new bytes[](3);
+        zkProofs[0] = abi.encode("proof1");
+        zkProofs[1] = abi.encode("proof2");
+        zkProofs[2] = abi.encode("proof3");
+        
+        vm.startPrank(address(eigenVaultAVS));
+        eigenVaultHook.batchProcessOrders(orderIds, executionPrices, zkProofs);
+        vm.stopPrank();
+        
+        // Check all orders are executed
+        for (uint i = 0; i < orderIds.length; i++) {
+            (,,,,, bool executed,) = eigenVaultHook.vaultOrders(orderIds[i]);
+            assertTrue(executed);
+        }
+    }
+
+    function test_batch_process_orders_mismatched_lengths() public {
+        bytes32[] memory orderIds = new bytes32[](2);
+        uint256[] memory executionPrices = new uint256[](3);
+        bytes[] memory zkProofs = new bytes[](2);
+        
+        vm.startPrank(address(eigenVaultAVS));
+        vm.expectRevert("Array length mismatch");
+        eigenVaultHook.batchProcessOrders(orderIds, executionPrices, zkProofs);
+        vm.stopPrank();
+    }
+
+    function test_batch_process_orders_only_avs() public {
+        bytes32[] memory orderIds = new bytes32[](1);
+        uint256[] memory executionPrices = new uint256[](1);
+        bytes[] memory zkProofs = new bytes[](1);
+        
+        vm.startPrank(trader1);
+        vm.expectRevert("Only EigenVault AVS");
+        eigenVaultHook.batchProcessOrders(orderIds, executionPrices, zkProofs);
+        vm.stopPrank();
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                         POOL LIQUIDITY TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_get_pool_liquidity() public view {
+        uint256 liquidity = eigenVaultHook.getPoolLiquidity(testPoolKey);
+        assertGt(liquidity, 0);
+        
+        bytes32 poolId = keccak256(abi.encode(testPoolKey));
+        uint256 expectedLiquidity = poolManager.poolLiquidity(poolId);
+        assertEq(liquidity, expectedLiquidity);
+    }
+
+    function test_get_pool_liquidity_nonexistent_pool() public {
+        PoolKey memory fakePool = PoolKey({
+            currency0: Currency.wrap(address(0x123)),
+            currency1: Currency.wrap(address(0x456)),
+            fee: 3000,
+            tickSpacing: 60,
+            hooks: IHooks(address(eigenVaultHook))
+        });
+        
+        uint256 liquidity = eigenVaultHook.getPoolLiquidity(fakePool);
+        assertEq(liquidity, 0);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                          EXECUTION STATISTICS TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_get_execution_stats() public {
+        bytes32 poolId = keccak256(abi.encode(testPoolKey));
+        
+        EigenVaultHook.ExecutionStats memory stats = eigenVaultHook.getExecutionStats(poolId);
+        assertEq(stats.totalOrders, 0);
+        assertEq(stats.successfulMatches, 0);
+        assertEq(stats.fallbackExecutions, 0);
+        assertEq(stats.totalVolume, 0);
+        assertEq(stats.averageExecutionTime, 0);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           COMMITMENT TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_commitment_usage_tracking() public {
+        bytes32 orderId = _createTestVaultOrder();
+        
+        (, , , , , , bytes32 commitment) = eigenVaultHook.vaultOrders(orderId);
+        
+        assertTrue(eigenVaultHook.usedCommitments(commitment));
+    }
+
+    function test_duplicate_commitment_prevention() public {
+        // This would be tested if the commitment generation was deterministic
+        // In the current implementation, commitments include timestamp so duplicates are unlikely
+        bytes32 orderId1 = _createTestVaultOrder();
+        bytes32 orderId2 = _createTestVaultOrder();
+        
+        (, , , , , , bytes32 commitment1) = eigenVaultHook.vaultOrders(orderId1);
+        (, , , , , , bytes32 commitment2) = eigenVaultHook.vaultOrders(orderId2);
+        
+        // Should be different due to timestamp
+        assertTrue(commitment1 != commitment2);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            HELPER FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    function _createTestVaultOrder() internal returns (bytes32) {
+        SwapParams memory params = SwapParams({
+            zeroForOne: true,
+            amountSpecified: int256(TEST_AMOUNT),
+            sqrtPriceLimitX96: 0
+        });
+        
+        bytes memory hookData = abi.encode("test_order", block.timestamp + 1 hours);
+        
+        eigenVaultHook.beforeSwap(trader1, testPoolKey, params, hookData);
+        
+        // Get the created order ID
+        uint256 orderNonce = eigenVaultHook.orderNonces(trader1);
+        return keccak256(abi.encodePacked(trader1, keccak256(abi.encode(testPoolKey)), orderNonce - 1, block.timestamp));
+    }
+
+    function _createTestVaultOrder2() internal returns (bytes32) {
+        SwapParams memory params = SwapParams({
+            zeroForOne: false,
+            amountSpecified: int256(TEST_AMOUNT),
+            sqrtPriceLimitX96: 0
+        });
+        
+        bytes memory hookData = abi.encode("test_order_2", block.timestamp + 1 hours);
+        
+        eigenVaultHook.beforeSwap(trader2, testPoolKey, params, hookData);
+        
+        // Get the created order ID
+        uint256 orderNonce = eigenVaultHook.orderNonces(trader2);
+        return keccak256(abi.encodePacked(trader2, keccak256(abi.encode(testPoolKey)), orderNonce - 1, block.timestamp));
+    }
+
+    function _createTestVaultOrder3() internal returns (bytes32) {
+        SwapParams memory params = SwapParams({
+            zeroForOne: true,
+            amountSpecified: int256(TEST_AMOUNT * 2),
+            sqrtPriceLimitX96: 0
+        });
+        
+        bytes memory hookData = abi.encode("test_order_3", block.timestamp + 2 hours);
+        
+        eigenVaultHook.beforeSwap(trader3, testPoolKey, params, hookData);
+        
+        // Get the created order ID
+        uint256 orderNonce = eigenVaultHook.orderNonces(trader3);
+        return keccak256(abi.encodePacked(trader3, keccak256(abi.encode(testPoolKey)), orderNonce - 1, block.timestamp));
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            EDGE CASE TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_max_gas_price_limit() public {
+        // Set very low gas price limit
+        EigenVaultHook.GasOptimization memory gasOpt = eigenVaultHook.gasOptimization();
+        gasOpt.gasPriceLimit = 1 gwei;
+        eigenVaultHook.updateGasOptimization(gasOpt);
+        
+        // This test would need actual gas price checking implementation
+        // Currently just testing that the configuration is set
+        EigenVaultHook.GasOptimization memory updated = eigenVaultHook.gasOptimization();
+        assertEq(updated.gasPriceLimit, 1 gwei);
+    }
+
+    function test_maximum_order_sizes() public {
+        // Test with maximum possible order size
+        SwapParams memory params = SwapParams({
+            zeroForOne: true,
+            amountSpecified: int256(type(uint128).max),
+            sqrtPriceLimitX96: 0
+        });
+        
+        bytes memory hookData = abi.encode("max_order", block.timestamp + 1 hours);
+        
+        // This should route to vault since it's definitely a large order
+        bytes4 result = eigenVaultHook.beforeSwap(trader1, testPoolKey, params, hookData);
+        assertEq(result, bytes4(0)); // Should return zero for vault routing
+    }
+
+    function test_minimum_order_sizes() public {
+        SwapParams memory params = SwapParams({
+            zeroForOne: true,
+            amountSpecified: 1, // Minimum possible
+            sqrtPriceLimitX96: 0
+        });
+        
+        bytes memory hookData = abi.encode("min_order");
+        
+        bytes4 result = eigenVaultHook.beforeSwap(trader1, testPoolKey, params, hookData);
+        assertEq(result, eigenVaultHook.beforeSwap.selector); // Should pass through
+    }
+
+    function test_concurrent_order_processing() public {
+        // Create multiple orders from different traders
+        bytes32 orderId1 = _createTestVaultOrder();
+        bytes32 orderId2 = _createTestVaultOrder2(); 
+        bytes32 orderId3 = _createTestVaultOrder3();
+        
+        // Process them concurrently (simulate)
+        vm.startPrank(address(eigenVaultAVS));
+        eigenVaultHook.executeVaultOrder(orderId1, 1800e18, abi.encode("proof1"));
+        eigenVaultHook.executeVaultOrder(orderId2, 1790e18, abi.encode("proof2"));
+        eigenVaultHook.executeVaultOrder(orderId3, 1810e18, abi.encode("proof3"));
+        vm.stopPrank();
+        
+        // All should be executed
+        (,,,,, bool executed1,) = eigenVaultHook.vaultOrders(orderId1);
+        (,,,,, bool executed2,) = eigenVaultHook.vaultOrders(orderId2);
+        (,,,,, bool executed3,) = eigenVaultHook.vaultOrders(orderId3);
+        
+        assertTrue(executed1);
+        assertTrue(executed2);
+        assertTrue(executed3);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                         INTEGRATION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_full_order_lifecycle() public {
+        // 1. Create order
+        bytes32 orderId = _createTestVaultOrder();
+        
+        // 2. Verify order exists
+        (uint256 amount, bool zeroForOne, uint256 price, uint256 deadline, address trader, bool executed, bytes32 commitment) = eigenVaultHook.vaultOrders(orderId);
+        assertGt(amount, 0);
+        assertEq(trader, trader1);
+        assertFalse(executed);
+        assertGt(deadline, block.timestamp);
+        
+        // 3. Execute order
+        vm.startPrank(address(eigenVaultAVS));
+        eigenVaultHook.executeVaultOrder(orderId, 1800e18, abi.encode("zkproof"));
+        vm.stopPrank();
+        
+        // 4. Verify execution
+        (,,,,, bool isExecuted,) = eigenVaultHook.vaultOrders(orderId);
+        assertTrue(isExecuted);
+    }
+
+    function test_order_expiration_and_fallback() public {
+        // 1. Create order
+        bytes32 orderId = _createTestVaultOrder();
+        
+        // 2. Let it expire
+        vm.warp(block.timestamp + 2 hours);
+        
+        // 3. Attempt execution should fail
+        vm.startPrank(address(eigenVaultAVS));
+        vm.expectRevert("Order expired");
+        eigenVaultHook.executeVaultOrder(orderId, 1800e18, abi.encode("zkproof"));
+        vm.stopPrank();
+        
+        // 4. Use fallback
+        eigenVaultHook.fallbackToAMM(orderId);
+        
+        // 5. Verify fallback execution
+        (,,,,, bool executed,) = eigenVaultHook.vaultOrders(orderId);
+        assertTrue(executed);
+    }
+}

@@ -1,0 +1,1022 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.26;
+
+import {Test} from "forge-std/Test.sol";
+import {console} from "forge-std/console.sol";
+import {SecurityLib} from "../../src/core/SecurityLib.sol";
+
+/// @title SecurityLibComprehensive
+/// @notice Comprehensive test suite for SecurityLib library covering all security functions
+contract SecurityLibComprehensiveTest is Test {
+    using SecurityLib for SecurityLib.SecurityConfig;
+    using SecurityLib for SecurityLib.RiskAssessment;
+
+    // Test addresses
+    address public constant TRADER1 = address(0x1);
+    address public constant TRADER2 = address(0x2);
+    address public constant MALICIOUS_USER = address(0x666);
+    bytes32 public constant TEST_POOL_ID = keccak256("test_pool");
+    bytes32 public constant TEST_ORDER_ID = keccak256("test_order");
+    
+    // Test amounts
+    uint256 public constant NORMAL_ORDER_SIZE = 1000e18;
+    uint256 public constant LARGE_ORDER_SIZE = 50000e18;
+    uint256 public constant MAX_ORDER_SIZE = 100000e18;
+    
+    function setUp() public {
+        // Setup test environment
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        SECURITY CONFIG TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_create_default_security_config() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        
+        assertEq(config.maxOrderSize, 10000e18);
+        assertEq(config.maxPoolExposure, 100000e18);
+        assertEq(config.maxSlippageBps, 500);
+        assertEq(config.emergencyPauseThreshold, 80);
+        assertFalse(config.emergencyPaused);
+        assertEq(config.lastSecurityCheck, 0);
+        assertEq(config.securityCheckInterval, 1 hours);
+    }
+
+    function test_validate_security_config_valid() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        
+        bool isValid = SecurityLib.validateSecurityConfig(config);
+        assertTrue(isValid);
+    }
+
+    function test_validate_security_config_zero_max_order_size() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        config.maxOrderSize = 0;
+        
+        bool isValid = SecurityLib.validateSecurityConfig(config);
+        assertFalse(isValid);
+    }
+
+    function test_validate_security_config_zero_max_pool_exposure() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        config.maxPoolExposure = 0;
+        
+        bool isValid = SecurityLib.validateSecurityConfig(config);
+        assertFalse(isValid);
+    }
+
+    function test_validate_security_config_invalid_slippage() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        config.maxSlippageBps = 10001; // > 100%
+        
+        bool isValid = SecurityLib.validateSecurityConfig(config);
+        assertFalse(isValid);
+    }
+
+    function test_validate_security_config_invalid_pause_threshold() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        config.emergencyPauseThreshold = 101; // > 100%
+        
+        bool isValid = SecurityLib.validateSecurityConfig(config);
+        assertFalse(isValid);
+    }
+
+    function test_validate_security_config_zero_check_interval() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        config.securityCheckInterval = 0;
+        
+        bool isValid = SecurityLib.validateSecurityConfig(config);
+        assertFalse(isValid);
+    }
+
+    function test_update_security_config_valid() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        
+        SecurityLib.SecurityConfig memory updatedConfig = SecurityLib.SecurityConfig({
+            maxOrderSize: 20000e18,
+            maxPoolExposure: 200000e18,
+            maxSlippageBps: 1000,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 2 hours
+        });
+        
+        assertEq(updatedConfig.maxOrderSize, 20000e18);
+        assertEq(updatedConfig.maxPoolExposure, 200000e18);
+        assertEq(updatedConfig.maxSlippageBps, 1000);
+        assertEq(updatedConfig.emergencyPauseThreshold, 90);
+        assertEq(updatedConfig.securityCheckInterval, 2 hours);
+        assertTrue(SecurityLib.validateSecurityConfig(updatedConfig));
+    }
+
+    function test_update_security_config_invalid() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        
+        SecurityLib.SecurityConfig memory updatedConfig = SecurityLib.SecurityConfig({
+            maxOrderSize: 0, // Invalid - should be > 0
+            maxPoolExposure: 200000e18,
+            maxSlippageBps: 1000,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 2 hours
+        });
+        
+        assertFalse(SecurityLib.validateSecurityConfig(updatedConfig));
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        RISK ASSESSMENT TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_create_risk_assessment() public view {
+        SecurityLib.RiskAssessment memory assessment = SecurityLib.createRiskAssessment(
+            TRADER1,
+            NORMAL_ORDER_SIZE,
+            TEST_POOL_ID
+        );
+        
+        assertEq(assessment.trader, TRADER1);
+        assertEq(assessment.orderSize, NORMAL_ORDER_SIZE);
+        assertEq(assessment.poolId, TEST_POOL_ID);
+        assertEq(assessment.timestamp, block.timestamp);
+        assertEq(assessment.riskScore, 0);
+        assertFalse(assessment.isHighRisk);
+        assertEq(assessment.riskFactors.length, 0);
+        assertEq(assessment.recommendations.length, 0);
+    }
+
+    function test_assess_order_size_risk_normal() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        
+        uint256 riskScore = SecurityLib.assessOrderSizeRisk(NORMAL_ORDER_SIZE, config);
+        assertLt(riskScore, 50); // Should be low risk
+    }
+
+    function test_assess_order_size_risk_large() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        
+        uint256 riskScore = SecurityLib.assessOrderSizeRisk(LARGE_ORDER_SIZE, config);
+        assertGt(riskScore, 50); // Should be higher risk
+    }
+
+    function test_assess_order_size_risk_maximum() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        config.maxOrderSize = MAX_ORDER_SIZE;
+        
+        uint256 riskScore = SecurityLib.assessOrderSizeRisk(MAX_ORDER_SIZE, config);
+        assertEq(riskScore, 100); // Should be maximum risk
+    }
+
+    function test_assess_order_size_risk_exceeds_max() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        
+        uint256 riskScore = SecurityLib.assessOrderSizeRisk(config.maxOrderSize + 1, config);
+        assertEq(riskScore, 100); // Should cap at 100
+    }
+
+    function test_assess_trader_risk_normal() public view {
+        uint256 riskScore = SecurityLib.assessTraderRisk(TRADER1);
+        assertLt(riskScore, 30); // Should be low risk for normal trader
+    }
+
+    function test_assess_trader_risk_malicious() public view {
+        uint256 riskScore = SecurityLib.assessTraderRisk(MALICIOUS_USER);
+        assertGt(riskScore, 70); // Should be high risk for suspicious address
+    }
+
+    function test_assess_trader_risk_zero_address() public view {
+        uint256 riskScore = SecurityLib.assessTraderRisk(address(0));
+        assertEq(riskScore, 100); // Should be maximum risk for zero address
+    }
+
+    function test_assess_pool_exposure_risk_low() public view {
+        uint256 currentExposure = 10000e18;
+        uint256 maxExposure = 100000e18;
+        
+        uint256 riskScore = SecurityLib.assessPoolExposureRisk(
+            TEST_POOL_ID,
+            currentExposure,
+            maxExposure
+        );
+        
+        assertLt(riskScore, 20); // Should be low risk
+    }
+
+    function test_assess_pool_exposure_risk_high() public view {
+        uint256 currentExposure = 90000e18;
+        uint256 maxExposure = 100000e18;
+        
+        uint256 riskScore = SecurityLib.assessPoolExposureRisk(
+            TEST_POOL_ID,
+            currentExposure,
+            maxExposure
+        );
+        
+        assertGt(riskScore, 80); // Should be high risk
+    }
+
+    function test_assess_pool_exposure_risk_maximum() public view {
+        uint256 currentExposure = 100000e18;
+        uint256 maxExposure = 100000e18;
+        
+        uint256 riskScore = SecurityLib.assessPoolExposureRisk(
+            TEST_POOL_ID,
+            currentExposure,
+            maxExposure
+        );
+        
+        assertEq(riskScore, 100); // Should be maximum risk
+    }
+
+    function test_assess_pool_exposure_risk_exceeds_max() public view {
+        uint256 currentExposure = 110000e18;
+        uint256 maxExposure = 100000e18;
+        
+        uint256 riskScore = SecurityLib.assessPoolExposureRisk(
+            TEST_POOL_ID,
+            currentExposure,
+            maxExposure
+        );
+        
+        assertEq(riskScore, 100); // Should cap at 100
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        SLIPPAGE PROTECTION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_validate_slippage_acceptable() public view {
+        uint256 expectedPrice = 1800e18;
+        uint256 actualPrice = 1790e18; // 0.55% slippage
+        uint256 maxSlippageBps = 500; // 5%
+        
+        bool isValid = SecurityLib.validateSlippage(expectedPrice, actualPrice, maxSlippageBps);
+        assertTrue(isValid);
+    }
+
+    function test_validate_slippage_excessive() public view {
+        uint256 expectedPrice = 1800e18;
+        uint256 actualPrice = 1700e18; // 5.55% slippage
+        uint256 maxSlippageBps = 500; // 5%
+        
+        bool isValid = SecurityLib.validateSlippage(expectedPrice, actualPrice, maxSlippageBps);
+        assertFalse(isValid);
+    }
+
+    function test_validate_slippage_zero_expected_price() public view {
+        uint256 actualPrice = 1800e18;
+        uint256 maxSlippageBps = 500;
+        
+        bool isValid = SecurityLib.validateSlippage(0, actualPrice, maxSlippageBps);
+        assertFalse(isValid);
+    }
+
+    function test_validate_slippage_zero_actual_price() public view {
+        uint256 expectedPrice = 1800e18;
+        uint256 maxSlippageBps = 500;
+        
+        bool isValid = SecurityLib.validateSlippage(expectedPrice, 0, maxSlippageBps);
+        assertFalse(isValid);
+    }
+
+    function test_validate_slippage_zero_max_slippage() public view {
+        uint256 expectedPrice = 1800e18;
+        uint256 actualPrice = 1800e18; // Exact match
+        
+        bool isValid = SecurityLib.validateSlippage(expectedPrice, actualPrice, 0);
+        assertTrue(isValid);
+        
+        // Any deviation should fail with zero tolerance
+        isValid = SecurityLib.validateSlippage(expectedPrice, actualPrice + 1, 0);
+        assertFalse(isValid);
+    }
+
+    function test_validate_slippage_higher_actual_price() public view {
+        uint256 expectedPrice = 1800e18;
+        uint256 actualPrice = 1900e18; // 5.55% positive slippage
+        uint256 maxSlippageBps = 500; // 5%
+        
+        bool isValid = SecurityLib.validateSlippage(expectedPrice, actualPrice, maxSlippageBps);
+        assertFalse(isValid); // Positive slippage beyond threshold should also fail
+    }
+
+    function test_calculate_slippage_bps() public view {
+        uint256 expectedPrice = 1800e18;
+        uint256 actualPrice = 1710e18; // 5% lower
+        
+        uint256 slippageBps = SecurityLib.calculateSlippageBps(expectedPrice, actualPrice);
+        assertEq(slippageBps, 500); // Should be 5% = 500 bps
+    }
+
+    function test_calculate_slippage_bps_zero_expected() public view {
+        uint256 actualPrice = 1800e18;
+        
+        uint256 slippageBps = SecurityLib.calculateSlippageBps(0, actualPrice);
+        assertEq(slippageBps, type(uint256).max); // Should return max for invalid input
+    }
+
+    function test_calculate_slippage_bps_same_price() public view {
+        uint256 price = 1800e18;
+        
+        uint256 slippageBps = SecurityLib.calculateSlippageBps(price, price);
+        assertEq(slippageBps, 0); // No slippage
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        MEV PROTECTION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_detect_mev_attack_none() public view {
+        bytes32[] memory recentTxs = new bytes32[](3);
+        recentTxs[0] = keccak256("tx1");
+        recentTxs[1] = keccak256("tx2");
+        recentTxs[2] = keccak256("tx3");
+        
+        bool isMevDetected = SecurityLib.detectMEVAttack(TEST_ORDER_ID, recentTxs);
+        assertFalse(isMevDetected);
+    }
+
+    function test_detect_mev_attack_sandwich() public view {
+        bytes32[] memory recentTxs = new bytes32[](5);
+        recentTxs[0] = keccak256("normal_tx");
+        recentTxs[1] = keccak256(abi.encodePacked("frontrun", TEST_ORDER_ID));
+        recentTxs[2] = TEST_ORDER_ID;
+        recentTxs[3] = keccak256(abi.encodePacked("backrun", TEST_ORDER_ID));
+        recentTxs[4] = keccak256("normal_tx");
+        
+        bool isMevDetected = SecurityLib.detectMEVAttack(TEST_ORDER_ID, recentTxs);
+        assertTrue(isMevDetected);
+    }
+
+    function test_detect_mev_attack_empty_history() public view {
+        bytes32[] memory emptyTxs = new bytes32[](0);
+        
+        bool isMevDetected = SecurityLib.detectMEVAttack(TEST_ORDER_ID, emptyTxs);
+        assertFalse(isMevDetected);
+    }
+
+    function test_calculate_mev_protection_score_low() public view {
+        uint256 score = SecurityLib.calculateMEVProtectionScore(TRADER1, false, 0);
+        assertLt(score, 30);
+    }
+
+    function test_calculate_mev_protection_score_high() public view {
+        uint256 score = SecurityLib.calculateMEVProtectionScore(MALICIOUS_USER, true, 5);
+        assertGt(score, 70);
+    }
+
+    function test_calculate_mev_protection_score_maximum() public view {
+        uint256 score = SecurityLib.calculateMEVProtectionScore(address(0), true, 10);
+        assertEq(score, 100);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        EMERGENCY PAUSE TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_should_trigger_emergency_pause_false() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        uint256 lowRiskScore = 30;
+        
+        bool shouldPause = SecurityLib.shouldTriggerEmergencyPause(lowRiskScore, config);
+        assertFalse(shouldPause);
+    }
+
+    function test_should_trigger_emergency_pause_true() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        uint256 highRiskScore = 90; // Above threshold of 80
+        
+        bool shouldPause = SecurityLib.shouldTriggerEmergencyPause(highRiskScore, config);
+        assertTrue(shouldPause);
+    }
+
+    function test_should_trigger_emergency_pause_at_threshold() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        uint256 thresholdRiskScore = config.emergencyPauseThreshold;
+        
+        bool shouldPause = SecurityLib.shouldTriggerEmergencyPause(thresholdRiskScore, config);
+        assertFalse(shouldPause); // Should not trigger at exactly the threshold
+    }
+
+    function test_should_trigger_emergency_pause_already_paused() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        config.emergencyPaused = true;
+        uint256 highRiskScore = 90;
+        
+        bool shouldPause = SecurityLib.shouldTriggerEmergencyPause(highRiskScore, config);
+        assertFalse(shouldPause); // Should not trigger if already paused
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        SECURITY CHECK TIMING TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_needs_security_check_false() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        config.lastSecurityCheck = block.timestamp - 30 minutes; // Recent check
+        
+        bool needsCheck = SecurityLib.needsSecurityCheck(config);
+        assertFalse(needsCheck);
+    }
+
+    function test_needs_security_check_true() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        config.lastSecurityCheck = block.timestamp - 2 hours; // Old check
+        
+        bool needsCheck = SecurityLib.needsSecurityCheck(config);
+        assertTrue(needsCheck);
+    }
+
+    function test_needs_security_check_never_checked() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        config.lastSecurityCheck = 0; // Never checked
+        
+        bool needsCheck = SecurityLib.needsSecurityCheck(config);
+        assertTrue(needsCheck);
+    }
+
+    function test_update_last_security_check() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        config.lastSecurityCheck = 0;
+        
+        SecurityLib.SecurityConfig memory updatedConfig = SecurityLib.updateLastSecurityCheck(config);
+        assertEq(updatedConfig.lastSecurityCheck, block.timestamp);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        COMPREHENSIVE RISK ASSESSMENT TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_perform_comprehensive_risk_assessment_low_risk() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        
+        SecurityLib.RiskAssessment memory assessment = SecurityLib.performComprehensiveRiskAssessment(
+            TRADER1,
+            NORMAL_ORDER_SIZE,
+            TEST_POOL_ID,
+            1800e18, // expectedPrice
+            1795e18, // actualPrice
+            config
+        );
+        
+        assertLt(assessment.riskScore, 50);
+        assertFalse(assessment.isHighRisk);
+    }
+
+    function test_perform_comprehensive_risk_assessment_high_risk() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        
+        SecurityLib.RiskAssessment memory assessment = SecurityLib.performComprehensiveRiskAssessment(
+            MALICIOUS_USER,
+            LARGE_ORDER_SIZE,
+            TEST_POOL_ID,
+            1800e18, // expectedPrice
+            1600e18, // actualPrice - high slippage
+            config
+        );
+        
+        assertGt(assessment.riskScore, 70);
+        assertTrue(assessment.isHighRisk);
+    }
+
+    function test_perform_comprehensive_risk_assessment_maximum_risk() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        
+        SecurityLib.RiskAssessment memory assessment = SecurityLib.performComprehensiveRiskAssessment(
+            address(0), // Zero address
+            config.maxOrderSize + 1, // Exceeds max
+            TEST_POOL_ID,
+            1800e18, // expectedPrice
+            0,       // Zero actual price
+            config
+        );
+        
+        assertEq(assessment.riskScore, 100);
+        assertTrue(assessment.isHighRisk);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        RISK FACTOR ANALYSIS TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_analyze_risk_factors_normal() public view {
+        SecurityLib.RiskAssessment memory assessment = SecurityLib.createRiskAssessment(
+            TRADER1,
+            NORMAL_ORDER_SIZE,
+            TEST_POOL_ID
+        );
+        
+        string[] memory factors = SecurityLib.analyzeRiskFactors(assessment);
+        assertEq(factors.length, 0); // No risk factors for normal assessment
+    }
+
+    function test_analyze_risk_factors_high_risk() public view {
+        SecurityLib.RiskAssessment memory assessment = SecurityLib.createRiskAssessment(
+            MALICIOUS_USER,
+            LARGE_ORDER_SIZE,
+            TEST_POOL_ID
+        );
+        assessment.riskScore = 90;
+        assessment.isHighRisk = true;
+        
+        string[] memory factors = SecurityLib.analyzeRiskFactors(assessment);
+        assertGt(factors.length, 0); // Should have risk factors
+    }
+
+    function test_generate_security_recommendations_low_risk() public view {
+        SecurityLib.RiskAssessment memory assessment = SecurityLib.createRiskAssessment(
+            TRADER1,
+            NORMAL_ORDER_SIZE,
+            TEST_POOL_ID
+        );
+        assessment.riskScore = 20;
+        
+        string[] memory recommendations = SecurityLib.generateSecurityRecommendations(assessment);
+        assertLt(recommendations.length, 3); // Few recommendations for low risk
+    }
+
+    function test_generate_security_recommendations_high_risk() public view {
+        SecurityLib.RiskAssessment memory assessment = SecurityLib.createRiskAssessment(
+            MALICIOUS_USER,
+            LARGE_ORDER_SIZE,
+            TEST_POOL_ID
+        );
+        assessment.riskScore = 90;
+        assessment.isHighRisk = true;
+        
+        string[] memory recommendations = SecurityLib.generateSecurityRecommendations(assessment);
+        assertGt(recommendations.length, 2); // More recommendations for high risk
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        SECURITY MONITORING TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_security_config_validation() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500, // 5%
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        
+        bool isValid = SecurityLib.validateSecurityConfig(config);
+        assertTrue(isValid);
+    }
+
+    function test_invalid_security_config() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 0, // Invalid
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 1500, // Invalid - over 10%
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 0 // Invalid
+        });
+        
+        bool isValid = SecurityLib.validateSecurityConfig(config);
+        assertFalse(isValid);
+    }
+
+    function test_anomaly_detection_large_order() public view {
+        uint256 orderSize = 2000e18; // Large order
+        uint256 poolExposure = 5000e18;
+        uint256[] memory recentOrders = new uint256[](3);
+        recentOrders[0] = 100e18;
+        recentOrders[1] = 200e18;
+        recentOrders[2] = 300e18;
+        
+        (bool hasAnomaly, string memory anomalyType) = SecurityLib.detectAnomalies(
+            orderSize, 
+            poolExposure, 
+            recentOrders
+        );
+        
+        assertTrue(hasAnomaly);
+        assertEq(anomalyType, "Large order anomaly");
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        BLACKLIST FUNCTIONALITY TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_is_blacklisted_false() public view {
+        bool isBlacklisted = SecurityLib.isBlacklisted(TRADER1);
+        assertFalse(isBlacklisted);
+    }
+
+    function test_is_blacklisted_true() public view {
+        bool isBlacklisted = SecurityLib.isBlacklisted(MALICIOUS_USER);
+        assertTrue(isBlacklisted); // Should be blacklisted based on address pattern
+    }
+
+    function test_is_blacklisted_zero_address() public view {
+        bool isBlacklisted = SecurityLib.isBlacklisted(address(0));
+        assertTrue(isBlacklisted); // Zero address should be blacklisted
+    }
+
+    function test_calculate_blacklist_score() public view {
+        uint256 score = SecurityLib.calculateBlacklistScore(TRADER1);
+        assertEq(score, 0); // Normal address should have zero score
+        
+        score = SecurityLib.calculateBlacklistScore(MALICIOUS_USER);
+        assertGt(score, 80); // Suspicious address should have high score
+        
+        score = SecurityLib.calculateBlacklistScore(address(0));
+        assertEq(score, 100); // Zero address should have maximum score
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        RATE LIMITING TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_is_rate_limited_false() public view {
+        bool isLimited = SecurityLib.isRateLimited(TRADER1, 5); // 5 orders
+        assertFalse(isLimited);
+    }
+
+    function test_is_rate_limited_true() public view {
+        bool isLimited = SecurityLib.isRateLimited(TRADER1, 1000); // Excessive orders
+        assertTrue(isLimited);
+    }
+
+    function test_calculate_rate_limit_score() public view {
+        uint256 score = SecurityLib.calculateRateLimitScore(TRADER1, 10);
+        assertLt(score, 30); // Should be low for reasonable order count
+        
+        score = SecurityLib.calculateRateLimitScore(TRADER1, 500);
+        assertGt(score, 70); // Should be high for excessive orders
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        EDGE CASE TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_maximum_risk_scores() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        
+        // Test maximum values don't cause overflow
+        uint256 maxOrderRisk = SecurityLib.assessOrderSizeRisk(type(uint256).max, config);
+        assertEq(maxOrderRisk, 100);
+        
+        uint256 maxPoolRisk = SecurityLib.assessPoolExposureRisk(
+            TEST_POOL_ID,
+            type(uint256).max,
+            type(uint256).max
+        );
+        assertEq(maxPoolRisk, 100);
+        
+        uint256 maxMevScore = SecurityLib.calculateMEVProtectionScore(
+            address(0),
+            true,
+            type(uint256).max
+        );
+        assertEq(maxMevScore, 100);
+    }
+
+    function test_zero_values_handling() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        
+        // Test zero values don't cause division by zero
+        uint256 riskScore = SecurityLib.assessOrderSizeRisk(0, config);
+        assertEq(riskScore, 0);
+        
+        bool slippageValid = SecurityLib.validateSlippage(0, 0, 0);
+        assertFalse(slippageValid); // Should be invalid
+        
+        uint256 slippageBps = SecurityLib.calculateSlippageBps(0, 100);
+        assertEq(slippageBps, type(uint256).max);
+    }
+
+    function test_extreme_slippage_values() public view {
+        uint256 expectedPrice = 1;
+        uint256 actualPrice = type(uint256).max;
+        
+        bool isValid = SecurityLib.validateSlippage(expectedPrice, actualPrice, 10000); // 100%
+        assertFalse(isValid); // Should be invalid due to extreme difference
+        
+        uint256 slippageBps = SecurityLib.calculateSlippageBps(expectedPrice, actualPrice);
+        assertEq(slippageBps, type(uint256).max); // Should cap at max
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        PERFORMANCE TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_risk_assessment_gas_efficiency() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        
+        uint256 gasStart = gasleft();
+        SecurityLib.RiskAssessment memory assessment = SecurityLib.performComprehensiveRiskAssessment(
+            TRADER1,
+            NORMAL_ORDER_SIZE,
+            TEST_POOL_ID,
+            1800e18,
+            1795e18,
+            config
+        );
+        uint256 gasUsed = gasStart - gasleft();
+        
+        console.log("Risk assessment gas used:", gasUsed);
+        assertLt(gasUsed, 100000); // Should be reasonably efficient
+        assertTrue(assessment.timestamp > 0);
+    }
+
+    function test_batch_risk_assessments() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        
+        // Test multiple risk assessments
+        for (uint i = 0; i < 10; i++) {
+            SecurityLib.RiskAssessment memory assessment = SecurityLib.performComprehensiveRiskAssessment(
+                address(uint160(i + 1)),
+                NORMAL_ORDER_SIZE + i * 1000e18,
+                keccak256(abi.encode("pool", i)),
+                1800e18,
+                1795e18 + i * 10e18,
+                config
+            );
+            
+            assertTrue(assessment.timestamp > 0);
+            assertLe(assessment.riskScore, 100);
+        }
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        INTEGRATION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_security_workflow_integration() public view {
+        SecurityLib.SecurityConfig memory config = SecurityLib.SecurityConfig({
+            maxOrderSize: 1000e18,
+            maxPoolExposure: 10000e18,
+            maxSlippageBps: 500,
+            emergencyPauseThreshold: 90,
+            emergencyPaused: false,
+            lastSecurityCheck: block.timestamp,
+            securityCheckInterval: 1 hours
+        });
+        
+        // 1. Check if security check is needed
+        bool needsCheck = SecurityLib.needsSecurityCheck(config);
+        assertTrue(needsCheck); // First time should need check
+        
+        // 2. Perform risk assessment
+        SecurityLib.RiskAssessment memory assessment = SecurityLib.performComprehensiveRiskAssessment(
+            TRADER1,
+            NORMAL_ORDER_SIZE,
+            TEST_POOL_ID,
+            1800e18,
+            1795e18,
+            config
+        );
+        
+        // 3. Check if emergency pause should be triggered
+        bool shouldPause = SecurityLib.shouldTriggerEmergencyPause(assessment.riskScore, config);
+        assertFalse(shouldPause); // Normal risk should not trigger pause
+        
+        // 4. Validate slippage
+        bool slippageValid = SecurityLib.validateSlippage(1800e18, 1795e18, config.maxSlippageBps);
+        assertTrue(slippageValid);
+        
+        // 5. Check for MEV attacks
+        bytes32[] memory recentTxs = new bytes32[](1);
+        recentTxs[0] = TEST_ORDER_ID;
+        bool mevDetected = SecurityLib.detectMEVAttack(TEST_ORDER_ID, recentTxs);
+        assertFalse(mevDetected);
+        
+        // 6. Update security check timestamp
+        SecurityLib.SecurityConfig memory updatedConfig = SecurityLib.updateLastSecurityCheck(config);
+        assertGt(updatedConfig.lastSecurityCheck, config.lastSecurityCheck);
+    }
+}

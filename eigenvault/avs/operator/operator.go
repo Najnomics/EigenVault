@@ -48,6 +48,22 @@ type Operator struct {
 	// EigenVault specific fields
 	orderMatchingTasks map[uint32]*OrderMatchingTask
 	orderMatchingTasksMutex sync.RWMutex
+	
+	// Enhanced operator management
+	operatorWeight    uint64
+	operatorStake     *big.Int
+	performanceScore  float64
+	lastHeartbeat     time.Time
+	heartbeatInterval time.Duration
+	
+	// Consensus tracking
+	consensusResponses map[uint32]*ConsensusResponse
+	consensusMutex     sync.RWMutex
+	
+	// ZK proof generation
+	zkProofGenerator   *ZKProofGenerator
+	proofCache         map[string]*ZKProof
+	proofCacheMutex    sync.RWMutex
 	taskResponseChan    chan TaskResponseInfo
 }
 
@@ -64,6 +80,17 @@ type Config struct {
 	EnableMetrics              bool   `json:"enable_metrics"`
 	NodeApiIpPortAddress       string `json:"node_api_ip_port_address"`
 	EnableNodeApi              bool   `json:"enable_node_api"`
+	
+	// ZK proof configuration
+	ZKCircuitPath         string `json:"zk_circuit_path"`
+	ZKProvingKeyPath      string `json:"zk_proving_key_path"`
+	ZKVerificationKeyPath string `json:"zk_verification_key_path"`
+	
+	// Enhanced operator settings
+	OperatorWeight        uint64        `json:"operator_weight"`
+	HeartbeatInterval     time.Duration `json:"heartbeat_interval"`
+	MaxConcurrentTasks    int           `json:"max_concurrent_tasks"`
+	TaskTimeout           time.Duration `json:"task_timeout"`
 }
 
 type OrderMatchingTask struct {
@@ -104,6 +131,28 @@ type TaskResponseInfo struct {
 	TaskResponse *OrderMatchingTaskResponse
 	BlsSignature types.Signature
 	OperatorId   types.OperatorId
+}
+
+type ConsensusResponse struct {
+	TaskId        uint32
+	MatchHash     common.Hash
+	ExecutionPrice *big.Int
+	Signature     []byte
+	Timestamp     time.Time
+	ZKProof       *ZKProof
+}
+
+type ZKProof struct {
+	Proof         []byte
+	PublicInputs  []*big.Int
+	VerificationKey []byte
+	Timestamp     time.Time
+}
+
+type ZKProofGenerator struct {
+	circuitPath    string
+	provingKeyPath string
+	verificationKeyPath string
 }
 
 func NewOperator(config Config, logger logging.Logger) (*Operator, error) {
@@ -177,6 +226,13 @@ func NewOperator(config Config, logger logging.Logger) (*Operator, error) {
 		go nodeApi.Start()
 	}
 
+	// Initialize ZK proof generator
+	zkProofGenerator := &ZKProofGenerator{
+		circuitPath:         config.ZKCircuitPath,
+		provingKeyPath:      config.ZKProvingKeyPath,
+		verificationKeyPath: config.ZKVerificationKeyPath,
+	}
+
 	operator := &Operator{
 		config:                  config,
 		logger:                  logger,
@@ -192,6 +248,20 @@ func NewOperator(config Config, logger logging.Logger) (*Operator, error) {
 		operatorEcdsaPrivateKey: operatorEcdsaPrivateKey,
 		orderMatchingTasks:     make(map[uint32]*OrderMatchingTask),
 		taskResponseChan:       make(chan TaskResponseInfo, 100),
+		
+		// Enhanced operator management
+		operatorWeight:        100, // Default weight
+		operatorStake:         big.NewInt(0),
+		performanceScore:      1.0, // Default performance score
+		lastHeartbeat:         time.Now(),
+		heartbeatInterval:     30 * time.Second,
+		
+		// Consensus tracking
+		consensusResponses:    make(map[uint32]*ConsensusResponse),
+		
+		// ZK proof generation
+		zkProofGenerator:      zkProofGenerator,
+		proofCache:            make(map[string]*ZKProof),
 	}
 
 	if config.RegisterOperatorOnStartup {
@@ -367,4 +437,157 @@ func (o *Operator) GetOperatorAddress() common.Address {
 // GetBlsPublicKey returns the operator's BLS public key
 func (o *Operator) GetBlsPublicKey() *types.G1Point {
 	return o.blsKeypair.PubkeyG1
+}
+
+// Enhanced operator methods
+
+// UpdateOperatorWeight updates the operator's weight based on performance
+func (o *Operator) UpdateOperatorWeight(newWeight uint64) {
+	o.operatorWeight = newWeight
+	o.logger.Info("Operator weight updated", "newWeight", newWeight)
+}
+
+// GetOperatorWeight returns the current operator weight
+func (o *Operator) GetOperatorWeight() uint64 {
+	return o.operatorWeight
+}
+
+// UpdatePerformanceScore updates the operator's performance score
+func (o *Operator) UpdatePerformanceScore(score float64) {
+	o.performanceScore = score
+	o.logger.Info("Performance score updated", "score", score)
+}
+
+// GetPerformanceScore returns the current performance score
+func (o *Operator) GetPerformanceScore() float64 {
+	return o.performanceScore
+}
+
+// UpdateStake updates the operator's stake amount
+func (o *Operator) UpdateStake(stake *big.Int) {
+	o.operatorStake = stake
+	o.logger.Info("Operator stake updated", "stake", stake.String())
+}
+
+// GetStake returns the current operator stake
+func (o *Operator) GetStake() *big.Int {
+	return o.operatorStake
+}
+
+// SendHeartbeat sends a heartbeat to maintain operator status
+func (o *Operator) SendHeartbeat() error {
+	o.lastHeartbeat = time.Now()
+	o.logger.Debug("Heartbeat sent", "timestamp", o.lastHeartbeat)
+	return nil
+}
+
+// IsHealthy checks if the operator is healthy based on last heartbeat
+func (o *Operator) IsHealthy() bool {
+	return time.Since(o.lastHeartbeat) < o.heartbeatInterval*2
+}
+
+// GenerateZKProof generates a ZK proof for order matching
+func (o *Operator) GenerateZKProof(taskId uint32, orders []MatchedOrder) (*ZKProof, error) {
+	// Check cache first
+	cacheKey := fmt.Sprintf("%d_%d", taskId, len(orders))
+	o.proofCacheMutex.RLock()
+	if cachedProof, exists := o.proofCache[cacheKey]; exists {
+		o.proofCacheMutex.RUnlock()
+		o.logger.Debug("Using cached ZK proof", "taskId", taskId)
+		return cachedProof, nil
+	}
+	o.proofCacheMutex.RUnlock()
+
+	// Generate new proof
+	proof := &ZKProof{
+		Timestamp: time.Now(),
+		// In a real implementation, this would call the ZK proof generation library
+		Proof:         []byte("mock_zk_proof"),
+		PublicInputs:  []*big.Int{big.NewInt(int64(taskId)), big.NewInt(int64(len(orders)))},
+		VerificationKey: []byte("mock_verification_key"),
+	}
+
+	// Cache the proof
+	o.proofCacheMutex.Lock()
+	o.proofCache[cacheKey] = proof
+	o.proofCacheMutex.Unlock()
+
+	o.logger.Info("Generated ZK proof", "taskId", taskId, "ordersCount", len(orders))
+	return proof, nil
+}
+
+// SubmitConsensusResponse submits a consensus response with ZK proof
+func (o *Operator) SubmitConsensusResponse(taskId uint32, matchHash common.Hash, executionPrice *big.Int, orders []MatchedOrder) error {
+	// Generate ZK proof
+	zkProof, err := o.GenerateZKProof(taskId, orders)
+	if err != nil {
+		return fmt.Errorf("failed to generate ZK proof: %w", err)
+	}
+
+	// Create consensus response
+	response := &ConsensusResponse{
+		TaskId:        taskId,
+		MatchHash:     matchHash,
+		ExecutionPrice: executionPrice,
+		Signature:     []byte("mock_signature"),
+		Timestamp:     time.Now(),
+		ZKProof:       zkProof,
+	}
+
+	// Store response
+	o.consensusMutex.Lock()
+	o.consensusResponses[taskId] = response
+	o.consensusMutex.Unlock()
+
+	o.logger.Info("Submitted consensus response", 
+		"taskId", taskId, 
+		"matchHash", matchHash.Hex(),
+		"executionPrice", executionPrice.String())
+
+	return nil
+}
+
+// GetConsensusResponse retrieves a consensus response for a task
+func (o *Operator) GetConsensusResponse(taskId uint32) (*ConsensusResponse, bool) {
+	o.consensusMutex.RLock()
+	defer o.consensusMutex.RUnlock()
+	response, exists := o.consensusResponses[taskId]
+	return response, exists
+}
+
+// GetActiveTasks returns the number of active tasks
+func (o *Operator) GetActiveTasks() int {
+	o.orderMatchingTasksMutex.RLock()
+	defer o.orderMatchingTasksMutex.RUnlock()
+	return len(o.orderMatchingTasks)
+}
+
+// GetTaskStatistics returns statistics about the operator's task performance
+func (o *Operator) GetTaskStatistics() map[string]interface{} {
+	o.orderMatchingTasksMutex.RLock()
+	defer o.orderMatchingTasksMutex.RUnlock()
+	
+	activeTasks := len(o.orderMatchingTasks)
+	completedTasks := 0
+	failedTasks := 0
+	
+	for _, task := range o.orderMatchingTasks {
+		switch task.Status {
+		case "completed":
+			completedTasks++
+		case "failed":
+			failedTasks++
+		}
+	}
+	
+	return map[string]interface{}{
+		"activeTasks":    activeTasks,
+		"completedTasks": completedTasks,
+		"failedTasks":    failedTasks,
+		"performanceScore": o.performanceScore,
+		"operatorWeight":   o.operatorWeight,
+		"stake":           o.operatorStake.String(),
+		"isHealthy":       o.IsHealthy(),
+		"lastHeartbeat":   o.lastHeartbeat,
+	}
 } 
