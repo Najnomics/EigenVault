@@ -139,7 +139,7 @@ contract EigenVaultAVS is IEigenVaultAVS, Ownable, Pausable, ReentrancyGuard {
     }
 
     /// @notice Deregister as an operator and withdraw stake
-    function deregisterOperator() external nonReentrant {
+    function deregisterOperator() external nonReentrant whenNotPaused {
         require(operators[msg.sender].isRegistered, "Not registered");
         require(!_hasPendingTasks(msg.sender), "Has pending tasks");
 
@@ -219,6 +219,10 @@ contract EigenVaultAVS is IEigenVaultAVS, Ownable, Pausable, ReentrancyGuard {
         require(block.timestamp <= tasks[taskIndex].deadline, "Task deadline passed");
         require(response.length > 0, "Empty response");
 
+        // Store the response and mark operator as responded
+        taskResponses[taskIndex][msg.sender] = response;
+        operatorResponded[taskIndex][msg.sender] = true;
+        
         tasks[taskIndex].isCompleted = true;
         tasks[taskIndex].assignedOperator = msg.sender;
         tasks[taskIndex].result = keccak256(response);
@@ -551,8 +555,10 @@ contract EigenVaultAVS is IEigenVaultAVS, Ownable, Pausable, ReentrancyGuard {
     /// @param operator The operator address
     /// @return hasPending Whether the operator has pending tasks
     function _hasPendingTasks(address operator) internal view returns (bool hasPending) {
+        // For this implementation, any incomplete task in the system prevents deregistration
+        // This is a conservative approach for security
         for (uint32 i = 1; i <= taskCounter; i++) {
-            if (operatorResponded[i][operator] && !tasks[i].isCompleted) {
+            if (tasks[i].orderId != bytes32(0) && !tasks[i].isCompleted) {
                 return true;
             }
         }

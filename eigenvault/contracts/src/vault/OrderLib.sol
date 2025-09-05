@@ -195,9 +195,27 @@ library OrderLib {
     /// @return priority The priority score (higher is better)
     function getOrderPriority(Order memory order) internal pure returns (uint256 priority) {
         // Price-time priority: better price gets higher priority, earlier orders break ties
-        uint256 priceScore = order.orderType == OrderType.Buy ? order.price : (type(uint256).max - order.price);
-        uint256 timeScore = type(uint256).max - order.timestamp;
-        return priceScore + (timeScore / 1000000); // Time as tiebreaker
+        // Use a simpler approach to avoid overflow/underflow
+        uint256 priceScore;
+        if (order.orderType == OrderType.Buy) {
+            // For buy orders, higher price is better
+            priceScore = order.price;
+        } else {
+            // For sell orders, lower price is better
+            // Use a reasonable max price to avoid overflow
+            uint256 maxReasonablePrice = 1e30;
+            if (order.price < maxReasonablePrice) {
+                priceScore = maxReasonablePrice - order.price;
+            } else {
+                priceScore = 0; // Very high prices get lowest priority
+            }
+        }
+        
+        // Add small time-based tiebreaker (lower timestamp = earlier = higher priority)
+        // Use a small constant minus a scaled timestamp difference
+        uint256 timeScore = order.timestamp % 1000000; // Take last 6 digits to keep it small
+        uint256 timeBonus = timeScore < 1000000 ? (1000000 - timeScore) : 0;
+        return priceScore + timeBonus; // Smaller timestamp gets higher priority
     }
 
     /// @notice Calculate order hash for matching
