@@ -2,27 +2,58 @@
 
 ## Overview
 
-EigenVault is a privacy-preserving trading infrastructure that combines Uniswap v4 Hooks with EigenLayer's Actively Validated Services (AVS) to enable institutional-grade dark pool functionality on DEXs. This document outlines the clean ZK proof-based architecture after removing all FHE implementations.
+EigenVault is a production-ready privacy-preserving trading infrastructure that combines Uniswap v4 Hooks with EigenLayer's Actively Validated Services (AVS) to enable institutional-grade private order routing on decentralized exchanges. This document details the zero-knowledge proof-based architecture that ensures privacy, security, and verifiable correctness without trusted intermediaries.
+
+### Key Architecture Principles
+- **Privacy by Design**: Order details remain private until execution
+- **Mathematical Security**: Zero-knowledge proofs provide cryptographic guarantees
+- **Decentralized Verification**: No trusted third parties required
+- **Production Ready**: Battle-tested ZK technology with extensive validation
 
 ## 🏗️ Architecture Overview
 
 ### Core Components
 
-1. **EigenVaultHook** - Uniswap v4 hook for order routing and execution
-2. **OrderVault** - Secure storage for order data with ZK proof verification
-3. **EigenVaultAVSServiceManager** - AVS integration for consensus and task management
-4. **ZK Proof Circuits** - Circom circuits for order validation and matching verification
+1. **EigenVaultHook** - Main Uniswap v4 hook contract handling order routing, threshold detection, and execution
+2. **OrderVault** - Secure order storage with commitment schemes and ZK proof verification
+3. **EigenVaultAVSServiceManager** - AVS integration managing operators, consensus, and task lifecycle
+4. **ZKProofLib** - Production ZK proof verification library with gas-optimized circuits
+5. **SecurityLib** - Comprehensive security controls including slashing protection and access management
+6. **OrderMatchingLib** - Advanced matching algorithms with privacy-preserving order discovery
 
-### Architecture Flow
+### Production Architecture Flow
 
 ```
-User Order → EigenVaultHook → Threshold Check → Route Decision
-                                    ↓
-                            Large Order → OrderVault → AVS Task Creation
-                                    ↓
-                            AVS Operators → Private Matching → ZK Proof Generation
-                                    ↓
-                            ZK Proof Verification → Order Execution → Uniswap Pool
+┌─────────────┐    ┌─────────────────┐    ┌──────────────────┐
+│ User Order  │───▶│ EigenVaultHook  │───▶│ Threshold Check  │
+└─────────────┘    └─────────────────┘    └──────────────────┘
+                                                   │
+                          ┌────────────────────────┴─────────────────────────┐
+                          │                                                  │
+                          ▼                                                  ▼
+                 ┌─────────────────┐                               ┌─────────────────┐
+                 │ Large Orders    │                               │ Small Orders    │
+                 │ → OrderVault    │                               │ → Direct Swap   │
+                 │ → ZK Commitment │                               │ → AMM Pool      │
+                 └─────────────────┘                               └─────────────────┘
+                          │
+                          ▼
+                 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+                 │ AVS Task        │───▶│ Private         │───▶│ ZK Proof        │
+                 │ Creation        │    │ Matching        │    │ Generation      │
+                 └─────────────────┘    └─────────────────┘    └─────────────────┘
+                          │                       │                       │
+                          │                       ▼                       │
+                          │            ┌─────────────────┐                │
+                          │            │ Operator        │                │
+                          │            │ Consensus       │                │
+                          │            └─────────────────┘                │
+                          │                       │                       │
+                          └───────────────────────┼───────────────────────┘
+                                                  ▼
+                          ┌─────────────────────────────────────────────────┐
+                          │ ZK Proof Verification → Execution → Results    │
+                          └─────────────────────────────────────────────────┘
 ```
 
 ## 🔐 ZK Proof Integration

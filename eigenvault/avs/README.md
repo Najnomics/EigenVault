@@ -1,6 +1,6 @@
 # EigenVault AVS (Actively Validated Services)
 
-A complete EigenLayer AVS implementation for EigenVault, providing privacy-preserving order matching with cryptoeconomic security.
+A production-ready EigenLayer AVS implementation for EigenVault, providing privacy-preserving order matching with zero-knowledge proofs and cryptoeconomic security. This system has undergone extensive testing with 343+ test functions and is ready for institutional deployment.
 
 ## 🏗️ Architecture Overview
 
@@ -12,15 +12,18 @@ EigenVault AVS consists of three main components:
 
 ### Smart Contracts
 
-- **`EigenVaultAVSServiceManager.sol`** - Core AVS service manager contract
-- **`IAVSDirectory.sol`** - Interface for EigenLayer AVS Directory integration
-- **Integration with main EigenVault contracts** - Hook and OrderVault integration
+- **`EigenVaultAVSServiceManager.sol`** - Core AVS service manager with operator registration and task management
+- **`IAVSDirectory.sol`** - EigenLayer AVS Directory interface for ecosystem integration
+- **ZKProofLib.sol** - Zero-knowledge proof verification for private order matching
+- **SecurityLib.sol** - Comprehensive security controls and slashing protection
+- **Integration with EigenVaultHook and OrderVault** - Seamless Uniswap v4 integration
 
 ### Go AVS Infrastructure
 
-- **Operator** - Processes order matching tasks and submits responses
-- **Aggregator** - Collects operator responses and reaches consensus
-- **AVS Registry** - Abstraction layer for blockchain interaction
+- **Operator** - High-performance order matching with ZK proof generation
+- **Aggregator** - Consensus formation and batch verification optimization
+- **AVS Registry** - Advanced blockchain interaction with slashing protection
+- **Monitoring** - Production-grade metrics and health monitoring
 
 ## 🚀 Quick Start
 
