@@ -2,14 +2,29 @@
 pragma solidity ^0.8.26;
 
 import "forge-std/Test.sol";
-import "../../src/avs/EigenVaultAVS.sol";
+import "../../src/avs/EigenVaultAVSServiceManager.sol";
 import "../../src/vault/OrderVault.sol";
+import {IAVSDirectory} from "@eigenlayer/interfaces/IAVSDirectory.sol";
+import {IRewardsCoordinator} from "@eigenlayer/interfaces/IRewardsCoordinator.sol";
+import {IAllocationManager} from "@eigenlayer/interfaces/IAllocationManager.sol";
+import {IPermissionController} from "@eigenlayer/interfaces/IPermissionController.sol";
+import {IStakeRegistry} from "@eigenlayer-middleware/interfaces/IStakeRegistry.sol";
+import {ISlashingRegistryCoordinator} from "@eigenlayer-middleware/interfaces/ISlashingRegistryCoordinator.sol";
+import "../mocks/EigenLayerMocks.sol";
 
 /// @title GovernanceTests
 /// @notice Comprehensive governance and administrative testing
 contract GovernanceTestsTest is Test {
-    EigenVaultAVS public avs;
+    EigenVaultAVSServiceManager public avs;
     OrderVault public orderVault;
+    
+    // Mock contracts
+    MockAVSDirectory public mockAVSDirectory;
+    MockRewardsCoordinator public mockRewardsCoordinator;
+    MockSlashingRegistryCoordinator public mockRegistryCoordinator;
+    MockStakeRegistry public mockStakeRegistry;
+    MockPermissionController public mockPermissionController;
+    MockAllocationManager public mockAllocationManager;
     
     address public constant OWNER = address(0x1);
     address public constant NEW_OWNER = address(0x2);
@@ -20,8 +35,24 @@ contract GovernanceTestsTest is Test {
     uint256 public constant MIN_STAKE = 32 ether;
     
     function setUp() public {
+        // Deploy mock contracts
+        mockAVSDirectory = new MockAVSDirectory();
+        mockRewardsCoordinator = new MockRewardsCoordinator();
+        mockRegistryCoordinator = new MockSlashingRegistryCoordinator();
+        mockStakeRegistry = new MockStakeRegistry();
+        mockPermissionController = new MockPermissionController();
+        mockAllocationManager = new MockAllocationManager();
+        
         vm.startPrank(OWNER);
-        avs = new EigenVaultAVS();
+        // Deploy AVS with proper interface types
+        avs = new EigenVaultAVSServiceManager(
+            IAVSDirectory(address(mockAVSDirectory)),
+            IRewardsCoordinator(address(mockRewardsCoordinator)),
+            ISlashingRegistryCoordinator(address(mockRegistryCoordinator)),
+            IStakeRegistry(address(mockStakeRegistry)),
+            IPermissionController(address(mockPermissionController)),
+            IAllocationManager(address(mockAllocationManager))
+        );
         orderVault = new OrderVault();
         vm.stopPrank();
     }

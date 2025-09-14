@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 import {IOrderVault} from "./IOrderVault.sol";
@@ -23,7 +23,7 @@ struct StoredOrder {
 /// @notice Secure storage for orders using ZK proof verification
 /// @dev Manages order storage, retrieval, and lifecycle with ZK proof integration
 contract OrderVault is ReentrancyGuard, Ownable, IOrderVault {
-    constructor() Ownable(msg.sender) {}
+    constructor() Ownable() {}
     
     // Errors
     error OrderVault__InvalidSender();

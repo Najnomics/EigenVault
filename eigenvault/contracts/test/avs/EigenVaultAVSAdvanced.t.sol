@@ -2,12 +2,18 @@
 pragma solidity ^0.8.26;
 
 import "forge-std/Test.sol";
-import "../../src/avs/EigenVaultAVS.sol";
+import "../../src/avs/EigenVaultAVSServiceManager.sol";
+import {IAVSDirectory} from "@eigenlayer/interfaces/IAVSDirectory.sol";
+import {IRewardsCoordinator} from "@eigenlayer/interfaces/IRewardsCoordinator.sol";
+import {IAllocationManager} from "@eigenlayer/interfaces/IAllocationManager.sol";
+import {IPermissionController} from "@eigenlayer/interfaces/IPermissionController.sol";
+import {IStakeRegistry} from "@eigenlayer-middleware/interfaces/IStakeRegistry.sol";
+import {ISlashingRegistryCoordinator} from "@eigenlayer-middleware/interfaces/ISlashingRegistryCoordinator.sol";
 
 /// @title EigenVaultAVSAdvancedTest
 /// @notice Advanced tests for EigenVaultAVS functionality
 contract EigenVaultAVSAdvancedTest is Test {
-    EigenVaultAVS public avs;
+    EigenVaultAVSServiceManager public avs;
     
     address public constant OPERATOR1 = address(0x1);
     address public constant OPERATOR2 = address(0x2);
@@ -15,8 +21,32 @@ contract EigenVaultAVSAdvancedTest is Test {
     
     uint256 public constant MIN_STAKE = 32 ether;
     
+    // Mock contracts
+    MockAVSDirectory public mockAVSDirectory;
+    MockRewardsCoordinator public mockRewardsCoordinator;
+    MockSlashingRegistryCoordinator public mockRegistryCoordinator;
+    MockStakeRegistry public mockStakeRegistry;
+    MockPermissionController public mockPermissionController;
+    MockAllocationManager public mockAllocationManager;
+    
     function setUp() public {
-        avs = new EigenVaultAVS();
+        // Deploy mock contracts
+        mockAVSDirectory = new MockAVSDirectory();
+        mockRewardsCoordinator = new MockRewardsCoordinator();
+        mockRegistryCoordinator = new MockSlashingRegistryCoordinator();
+        mockStakeRegistry = new MockStakeRegistry();
+        mockPermissionController = new MockPermissionController();
+        mockAllocationManager = new MockAllocationManager();
+        
+        // Deploy AVS with proper interface types
+        avs = new EigenVaultAVSServiceManager(
+            IAVSDirectory(address(mockAVSDirectory)),
+            IRewardsCoordinator(address(mockRewardsCoordinator)),
+            ISlashingRegistryCoordinator(address(mockRegistryCoordinator)),
+            IStakeRegistry(address(mockStakeRegistry)),
+            IPermissionController(address(mockPermissionController)),
+            IAllocationManager(address(mockAllocationManager))
+        );
     }
     
     function testAdvancedOperatorRegistration() public {
@@ -458,4 +488,48 @@ contract EigenVaultAVSAdvancedTest is Test {
         vm.expectRevert();
         avs.slashOperator(OPERATOR1, 1 ether, "test");
     }
+}
+
+// Mock contract implementations
+contract MockAVSDirectory {
+    function registerOperator(address /*operator*/, bytes calldata /*operatorSignature*/) external {}
+    function deregisterOperator(address /*operator*/) external {}
+}
+
+contract MockRewardsCoordinator {
+    function createAVSRewardsSubmission(
+        address[] calldata /*rewardsSubmissionTokens*/,
+        uint256[] calldata /*rewardsSubmissionAmounts*/,
+        address /*rewardsSubmissionToken*/,
+        uint256 /*rewardsSubmissionAmount*/,
+        uint32 /*rewardsSubmissionDuration*/,
+        uint32 /*rewardsSubmissionStartTimestamp*/
+    ) external {}
+}
+
+contract MockSlashingRegistryCoordinator {
+    function registerOperator(
+        address /*operator*/,
+        uint32 /*serveUntilBlock*/
+    ) external {}
+    
+    function deregisterOperator(address /*operator*/) external {}
+}
+
+contract MockStakeRegistry {
+    function registerOperator(
+        address /*operator*/,
+        bytes calldata /*signature*/
+    ) external {}
+    
+    function deregisterOperator(address /*operator*/) external {}
+}
+
+contract MockPermissionController {
+    function setPermission(address /*target*/, bytes4 /*selector*/, bool /*allowed*/) external {}
+}
+
+contract MockAllocationManager {
+    function allocateToOperator(address /*operator*/, uint256 /*amount*/) external {}
+    function deallocateFromOperator(address /*operator*/, uint256 /*amount*/) external {}
 }

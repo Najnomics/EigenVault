@@ -13,12 +13,12 @@ import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 import {IEigenVaultHook} from "./IEigenVaultHook.sol";
 import {IOrderVault} from "../vault/IOrderVault.sol";
-import {IEigenVaultAVS} from "../avs/IEigenVaultAVS.sol";
+import {IEigenVaultAVSServiceManager} from "../avs/IEigenVaultAVSServiceManager.sol";
 import {OrderLib} from "../vault/OrderLib.sol";
 import {ZKProofLib} from "../core/ZKProofLib.sol";
 import {OrderMatchingLib} from "../vault/OrderMatchingLib.sol";
@@ -35,7 +35,7 @@ contract EigenVaultHook is BaseHook, ReentrancyGuard, Ownable, IEigenVaultHook {
     using PoolIdLibrary for PoolKey;
 
     /// @notice AVS contract for EigenLayer integration
-    IEigenVaultAVS public immutable EIGEN_VAULT_AVS;
+    IEigenVaultAVSServiceManager public immutable EIGEN_VAULT_AVS;
 
     /// @notice The order vault contract for order storage
     address public immutable ORDER_VAULT;
@@ -156,11 +156,11 @@ contract EigenVaultHook is BaseHook, ReentrancyGuard, Ownable, IEigenVaultHook {
         IPoolManager _poolManager,
         address _ORDER_VAULT,
         address _EIGEN_VAULT_AVS
-    ) BaseHook(_poolManager) Ownable(msg.sender) {
+    ) BaseHook(_poolManager) Ownable() {
         require(_ORDER_VAULT != address(0), "Invalid order vault address");
         require(_EIGEN_VAULT_AVS != address(0), "Invalid EigenVault AVS address");
         ORDER_VAULT = _ORDER_VAULT;
-        EIGEN_VAULT_AVS = IEigenVaultAVS(_EIGEN_VAULT_AVS);
+        EIGEN_VAULT_AVS = IEigenVaultAVSServiceManager(_EIGEN_VAULT_AVS);
         
         // Consensus configuration handled by Go AVS implementation
         // consensusConfig = AVSConsensusLib.ConsensusConfig({

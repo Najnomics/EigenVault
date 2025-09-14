@@ -2,7 +2,7 @@
 pragma solidity ^0.8.26;
 
 import "forge-std/Test.sol";
-import "../../src/avs/EigenVaultAVS.sol";
+import "../../src/avs/EigenVaultAVSServiceManager.sol";
 import "../../src/vault/OrderVault.sol";
 import "../../src/core/ZKProofLib.sol";
 import "../../src/vault/OrderLib.sol";
@@ -10,11 +10,26 @@ import "../../src/vault/OrderMatchingLib.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {IAVSDirectory} from "@eigenlayer/interfaces/IAVSDirectory.sol";
+import {IRewardsCoordinator} from "@eigenlayer/interfaces/IRewardsCoordinator.sol";
+import {IAllocationManager} from "@eigenlayer/interfaces/IAllocationManager.sol";
+import {IPermissionController} from "@eigenlayer/interfaces/IPermissionController.sol";
+import {IStakeRegistry} from "@eigenlayer-middleware/interfaces/IStakeRegistry.sol";
+import {ISlashingRegistryCoordinator} from "@eigenlayer-middleware/interfaces/ISlashingRegistryCoordinator.sol";
+import "../mocks/EigenLayerMocks.sol";
 
 /// @title EdgeCaseTests
 /// @notice Comprehensive edge case and boundary condition testing
 contract EdgeCaseTestsTest is Test {
-    EigenVaultAVS public avs;
+    EigenVaultAVSServiceManager public avs;
+    
+    // Mock contracts
+    MockAVSDirectory public mockAVSDirectory;
+    MockRewardsCoordinator public mockRewardsCoordinator;
+    MockSlashingRegistryCoordinator public mockRegistryCoordinator;
+    MockStakeRegistry public mockStakeRegistry;
+    MockPermissionController public mockPermissionController;
+    MockAllocationManager public mockAllocationManager;
     OrderVault public orderVault;
     OrderMatchingLib.OrderBook public edgeOrderBook;
     
@@ -22,7 +37,23 @@ contract EdgeCaseTestsTest is Test {
     uint256 public constant MIN_STAKE = 32 ether;
     
     function setUp() public {
-        avs = new EigenVaultAVS();
+        // Deploy mock contracts
+        mockAVSDirectory = new MockAVSDirectory();
+        mockRewardsCoordinator = new MockRewardsCoordinator();
+        mockRegistryCoordinator = new MockSlashingRegistryCoordinator();
+        mockStakeRegistry = new MockStakeRegistry();
+        mockPermissionController = new MockPermissionController();
+        mockAllocationManager = new MockAllocationManager();
+        
+        // Deploy AVS with proper interface types
+        avs = new EigenVaultAVSServiceManager(
+            IAVSDirectory(address(mockAVSDirectory)),
+            IRewardsCoordinator(address(mockRewardsCoordinator)),
+            ISlashingRegistryCoordinator(address(mockRegistryCoordinator)),
+            IStakeRegistry(address(mockStakeRegistry)),
+            IPermissionController(address(mockPermissionController)),
+            IAllocationManager(address(mockAllocationManager))
+        );
         orderVault = new OrderVault();
         orderVault.authorizeHook(address(avs), true);
         edgeOrderBook.poolId = keccak256("edge_pool");

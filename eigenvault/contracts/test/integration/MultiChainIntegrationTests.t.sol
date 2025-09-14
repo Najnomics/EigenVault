@@ -2,24 +2,39 @@
 pragma solidity ^0.8.26;
 
 import "forge-std/Test.sol";
-import "../../src/avs/EigenVaultAVS.sol";
+import "../../src/avs/EigenVaultAVSServiceManager.sol";
 import "../../src/vault/OrderVault.sol";
 import "../../src/hooks/EigenVaultHook.sol";
 import "../hooks/MockPoolManager.sol";
 import "../core/MockERC20.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IAVSDirectory} from "@eigenlayer/interfaces/IAVSDirectory.sol";
+import {IRewardsCoordinator} from "@eigenlayer/interfaces/IRewardsCoordinator.sol";
+import {IAllocationManager} from "@eigenlayer/interfaces/IAllocationManager.sol";
+import {IPermissionController} from "@eigenlayer/interfaces/IPermissionController.sol";
+import {IStakeRegistry} from "@eigenlayer-middleware/interfaces/IStakeRegistry.sol";
+import {ISlashingRegistryCoordinator} from "@eigenlayer-middleware/interfaces/ISlashingRegistryCoordinator.sol";
+import "../mocks/EigenLayerMocks.sol";
 
 /// @title MultiChainIntegrationTests
 /// @notice Tests for multi-chain scenarios, cross-protocol integration, and bridge-like functionality
 contract MultiChainIntegrationTests is Test {
-    EigenVaultAVS public mainnetAVS;
-    EigenVaultAVS public l2AVS;
+    EigenVaultAVSServiceManager public mainnetAVS;
+    EigenVaultAVSServiceManager public l2AVS;
     OrderVault public mainnetOrderVault;
     OrderVault public l2OrderVault;
     MockPoolManager public mainnetPoolManager;
     MockPoolManager public l2PoolManager;
     MockERC20 public mainnetToken;
     MockERC20 public l2Token;
+    
+    // Mock contracts
+    MockAVSDirectory public mockAVSDirectory;
+    MockRewardsCoordinator public mockRewardsCoordinator;
+    MockSlashingRegistryCoordinator public mockRegistryCoordinator;
+    MockStakeRegistry public mockStakeRegistry;
+    MockPermissionController public mockPermissionController;
+    MockAllocationManager public mockAllocationManager;
     
     address public constant OWNER = address(0x1);
     address public constant MAINNET_OPERATOR = address(0x10);
@@ -39,15 +54,37 @@ contract MultiChainIntegrationTests is Test {
     event ChainSyncCompleted(uint256 chainId, uint256 blockNumber);
 
     function setUp() public {
+        // Deploy mock contracts
+        mockAVSDirectory = new MockAVSDirectory();
+        mockRewardsCoordinator = new MockRewardsCoordinator();
+        mockRegistryCoordinator = new MockSlashingRegistryCoordinator();
+        mockStakeRegistry = new MockStakeRegistry();
+        mockPermissionController = new MockPermissionController();
+        mockAllocationManager = new MockAllocationManager();
+        
         // Deploy mainnet contracts
         vm.startPrank(OWNER);
-        mainnetAVS = new EigenVaultAVS();
+        mainnetAVS = new EigenVaultAVSServiceManager(
+            IAVSDirectory(address(mockAVSDirectory)),
+            IRewardsCoordinator(address(mockRewardsCoordinator)),
+            ISlashingRegistryCoordinator(address(mockRegistryCoordinator)),
+            IStakeRegistry(address(mockStakeRegistry)),
+            IPermissionController(address(mockPermissionController)),
+            IAllocationManager(address(mockAllocationManager))
+        );
         mainnetOrderVault = new OrderVault();
         mainnetPoolManager = new MockPoolManager();
         mainnetToken = new MockERC20("MainnetToken", "MNET", 18);
         
         // Deploy L2 contracts (simulating different chain)
-        l2AVS = new EigenVaultAVS();
+        l2AVS = new EigenVaultAVSServiceManager(
+            IAVSDirectory(address(mockAVSDirectory)),
+            IRewardsCoordinator(address(mockRewardsCoordinator)),
+            ISlashingRegistryCoordinator(address(mockRegistryCoordinator)),
+            IStakeRegistry(address(mockStakeRegistry)),
+            IPermissionController(address(mockPermissionController)),
+            IAllocationManager(address(mockAllocationManager))
+        );
         l2OrderVault = new OrderVault();
         l2PoolManager = new MockPoolManager();
         l2Token = new MockERC20("L2Token", "L2TK", 18);

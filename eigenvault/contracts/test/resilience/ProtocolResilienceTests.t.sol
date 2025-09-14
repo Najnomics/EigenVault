@@ -2,20 +2,35 @@
 pragma solidity ^0.8.26;
 
 import "forge-std/Test.sol";
-import "../../src/avs/EigenVaultAVS.sol";
+import "../../src/avs/EigenVaultAVSServiceManager.sol";
 import "../../src/vault/OrderVault.sol";
 import "../../src/hooks/EigenVaultHook.sol";
 import "../hooks/MockPoolManager.sol";
 import "../core/MockERC20.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IAVSDirectory} from "@eigenlayer/interfaces/IAVSDirectory.sol";
+import {IRewardsCoordinator} from "@eigenlayer/interfaces/IRewardsCoordinator.sol";
+import {IAllocationManager} from "@eigenlayer/interfaces/IAllocationManager.sol";
+import {IPermissionController} from "@eigenlayer/interfaces/IPermissionController.sol";
+import {IStakeRegistry} from "@eigenlayer-middleware/interfaces/IStakeRegistry.sol";
+import {ISlashingRegistryCoordinator} from "@eigenlayer-middleware/interfaces/ISlashingRegistryCoordinator.sol";
+import "../mocks/EigenLayerMocks.sol";
 
 /// @title ProtocolResilienceTests
 /// @notice Tests for protocol resilience, recovery mechanisms, and failure handling
 contract ProtocolResilienceTests is Test {
-    EigenVaultAVS public avs;
+    EigenVaultAVSServiceManager public avs;
     OrderVault public orderVault;
     MockPoolManager public poolManager;
     MockERC20 public token;
+    
+    // Mock contracts
+    MockAVSDirectory public mockAVSDirectory;
+    MockRewardsCoordinator public mockRewardsCoordinator;
+    MockSlashingRegistryCoordinator public mockRegistryCoordinator;
+    MockStakeRegistry public mockStakeRegistry;
+    MockPermissionController public mockPermissionController;
+    MockAllocationManager public mockAllocationManager;
     
     address public constant OWNER = address(0x1);
     address public constant OPERATOR1 = address(0x10);
@@ -31,8 +46,23 @@ contract ProtocolResilienceTests is Test {
     event SystemHealthCheck(uint256 timestamp, bool healthy);
 
     function setUp() public {
+        // Deploy mock contracts
+        mockAVSDirectory = new MockAVSDirectory();
+        mockRewardsCoordinator = new MockRewardsCoordinator();
+        mockRegistryCoordinator = new MockSlashingRegistryCoordinator();
+        mockStakeRegistry = new MockStakeRegistry();
+        mockPermissionController = new MockPermissionController();
+        mockAllocationManager = new MockAllocationManager();
+        
         vm.startPrank(OWNER);
-        avs = new EigenVaultAVS();
+        avs = new EigenVaultAVSServiceManager(
+            IAVSDirectory(address(mockAVSDirectory)),
+            IRewardsCoordinator(address(mockRewardsCoordinator)),
+            ISlashingRegistryCoordinator(address(mockRegistryCoordinator)),
+            IStakeRegistry(address(mockStakeRegistry)),
+            IPermissionController(address(mockPermissionController)),
+            IAllocationManager(address(mockAllocationManager))
+        );
         orderVault = new OrderVault();
         poolManager = new MockPoolManager();
         token = new MockERC20("TestToken", "TEST", 18);

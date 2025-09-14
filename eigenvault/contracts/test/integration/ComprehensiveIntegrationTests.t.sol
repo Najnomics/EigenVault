@@ -2,26 +2,57 @@
 pragma solidity ^0.8.26;
 
 import "forge-std/Test.sol";
-import "../../src/avs/EigenVaultAVS.sol";
+import "../../src/avs/EigenVaultAVSServiceManager.sol";
 import "../../src/vault/OrderVault.sol";
 import "../../src/core/ZKProofLib.sol";
 import "../../src/vault/OrderLib.sol";
 import "../../src/vault/OrderMatchingLib.sol";
 import "../core/MockERC20.sol";
+import {IAVSDirectory} from "@eigenlayer/interfaces/IAVSDirectory.sol";
+import {IRewardsCoordinator} from "@eigenlayer/interfaces/IRewardsCoordinator.sol";
+import {IAllocationManager} from "@eigenlayer/interfaces/IAllocationManager.sol";
+import {IPermissionController} from "@eigenlayer/interfaces/IPermissionController.sol";
+import {IStakeRegistry} from "@eigenlayer-middleware/interfaces/IStakeRegistry.sol";
+import {ISlashingRegistryCoordinator} from "@eigenlayer-middleware/interfaces/ISlashingRegistryCoordinator.sol";
+import "../mocks/EigenLayerMocks.sol";
 
 /// @title ComprehensiveIntegrationTests
 /// @notice Final comprehensive integration tests to reach 400 test target
 contract ComprehensiveIntegrationTestsTest is Test {
-    EigenVaultAVS public avs;
+    EigenVaultAVSServiceManager public avs;
     OrderVault public orderVault;
     MockERC20 public token0;
     MockERC20 public token1;
     OrderMatchingLib.OrderBook public integrationOrderBook;
     
+    // Mock contracts
+    MockAVSDirectory public mockAVSDirectory;
+    MockRewardsCoordinator public mockRewardsCoordinator;
+    MockSlashingRegistryCoordinator public mockRegistryCoordinator;
+    MockStakeRegistry public mockStakeRegistry;
+    MockPermissionController public mockPermissionController;
+    MockAllocationManager public mockAllocationManager;
+    
     uint256 public constant MIN_STAKE = 32 ether;
     
     function setUp() public {
-        avs = new EigenVaultAVS();
+        // Deploy mock contracts
+        mockAVSDirectory = new MockAVSDirectory();
+        mockRewardsCoordinator = new MockRewardsCoordinator();
+        mockRegistryCoordinator = new MockSlashingRegistryCoordinator();
+        mockStakeRegistry = new MockStakeRegistry();
+        mockPermissionController = new MockPermissionController();
+        mockAllocationManager = new MockAllocationManager();
+        
+        // Deploy AVS with proper interface types
+        avs = new EigenVaultAVSServiceManager(
+            IAVSDirectory(address(mockAVSDirectory)),
+            IRewardsCoordinator(address(mockRewardsCoordinator)),
+            ISlashingRegistryCoordinator(address(mockRegistryCoordinator)),
+            IStakeRegistry(address(mockStakeRegistry)),
+            IPermissionController(address(mockPermissionController)),
+            IAllocationManager(address(mockAllocationManager))
+        );
         orderVault = new OrderVault();
         token0 = new MockERC20("Token0", "TK0", 18);
         token1 = new MockERC20("Token1", "TK1", 18);

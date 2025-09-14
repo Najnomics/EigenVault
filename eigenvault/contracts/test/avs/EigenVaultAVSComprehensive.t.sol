@@ -3,14 +3,28 @@ pragma solidity ^0.8.26;
 
 import {Test} from "forge-std/Test.sol";
 import {console} from "forge-std/console.sol";
-import {EigenVaultAVS} from "../../src/avs/EigenVaultAVS.sol";
-import {IEigenVaultAVS} from "../../src/avs/IEigenVaultAVS.sol";
+import {EigenVaultAVSServiceManager} from "../../src/avs/EigenVaultAVSServiceManager.sol";
+import {IEigenVaultAVSServiceManager} from "../../src/avs/IEigenVaultAVSServiceManager.sol";
+import {IAVSDirectory} from "@eigenlayer/interfaces/IAVSDirectory.sol";
+import {IRewardsCoordinator} from "@eigenlayer/interfaces/IRewardsCoordinator.sol";
+import {IAllocationManager} from "@eigenlayer/interfaces/IAllocationManager.sol";
+import {IPermissionController} from "@eigenlayer/interfaces/IPermissionController.sol";
+import {IStakeRegistry} from "@eigenlayer-middleware/interfaces/IStakeRegistry.sol";
+import {ISlashingRegistryCoordinator} from "@eigenlayer-middleware/interfaces/ISlashingRegistryCoordinator.sol";
 
 /// @title EigenVaultAVSComprehensive
 /// @notice Comprehensive test suite for EigenVaultAVS contract covering all AVS functionalities
 contract EigenVaultAVSComprehensiveTest is Test {
     
-    EigenVaultAVS public eigenVaultAVS;
+    EigenVaultAVSServiceManager public eigenVaultAVS;
+    
+    // Mock contracts
+    MockAVSDirectory public mockAVSDirectory;
+    MockRewardsCoordinator public mockRewardsCoordinator;
+    MockSlashingRegistryCoordinator public mockRegistryCoordinator;
+    MockStakeRegistry public mockStakeRegistry;
+    MockPermissionController public mockPermissionController;
+    MockAllocationManager public mockAllocationManager;
     
     // Test addresses
     address public owner = address(this);
@@ -38,7 +52,23 @@ contract EigenVaultAVSComprehensiveTest is Test {
     event EmergencyPauseDeactivated();
     
     function setUp() public {
-        eigenVaultAVS = new EigenVaultAVS();
+        // Deploy mock contracts
+        mockAVSDirectory = new MockAVSDirectory();
+        mockRewardsCoordinator = new MockRewardsCoordinator();
+        mockRegistryCoordinator = new MockSlashingRegistryCoordinator();
+        mockStakeRegistry = new MockStakeRegistry();
+        mockPermissionController = new MockPermissionController();
+        mockAllocationManager = new MockAllocationManager();
+        
+        // Deploy AVS with proper interface types
+        eigenVaultAVS = new EigenVaultAVSServiceManager(
+            IAVSDirectory(address(mockAVSDirectory)),
+            IRewardsCoordinator(address(mockRewardsCoordinator)),
+            ISlashingRegistryCoordinator(address(mockRegistryCoordinator)),
+            IStakeRegistry(address(mockStakeRegistry)),
+            IPermissionController(address(mockPermissionController)),
+            IAllocationManager(address(mockAllocationManager))
+        );
         
         // Fund test accounts
         vm.deal(operator1, 1000 ether);
@@ -939,4 +969,48 @@ contract EigenVaultAVSComprehensiveTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     receive() external payable {}
+}
+
+// Mock contract implementations
+contract MockAVSDirectory {
+    function registerOperator(address /*operator*/, bytes calldata /*operatorSignature*/) external {}
+    function deregisterOperator(address /*operator*/) external {}
+}
+
+contract MockRewardsCoordinator {
+    function createAVSRewardsSubmission(
+        address[] calldata /*rewardsSubmissionTokens*/,
+        uint256[] calldata /*rewardsSubmissionAmounts*/,
+        address /*rewardsSubmissionToken*/,
+        uint256 /*rewardsSubmissionAmount*/,
+        uint32 /*rewardsSubmissionDuration*/,
+        uint32 /*rewardsSubmissionStartTimestamp*/
+    ) external {}
+}
+
+contract MockSlashingRegistryCoordinator {
+    function registerOperator(
+        address /*operator*/,
+        uint32 /*serveUntilBlock*/
+    ) external {}
+    
+    function deregisterOperator(address /*operator*/) external {}
+}
+
+contract MockStakeRegistry {
+    function registerOperator(
+        address /*operator*/,
+        bytes calldata /*signature*/
+    ) external {}
+    
+    function deregisterOperator(address /*operator*/) external {}
+}
+
+contract MockPermissionController {
+    function setPermission(address /*target*/, bytes4 /*selector*/, bool /*allowed*/) external {}
+}
+
+contract MockAllocationManager {
+    function allocateToOperator(address /*operator*/, uint256 /*amount*/) external {}
+    function deallocateFromOperator(address /*operator*/, uint256 /*amount*/) external {}
 }

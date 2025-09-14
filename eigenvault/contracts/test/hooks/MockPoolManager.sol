@@ -6,6 +6,7 @@ pragma solidity ^0.8.26;
 contract MockPoolManager {
     mapping(bytes32 => bool) public poolExists;
     mapping(bytes32 => uint256) public poolLiquidity;
+    bool public shouldFailSwap;
     
     event Swap(
         bytes32 indexed poolId,
@@ -22,6 +23,10 @@ contract MockPoolManager {
         poolLiquidity[poolId] = 1000000e18; // 1M tokens liquidity
     }
     
+    function setShouldFailSwap(bool _shouldFail) external {
+        shouldFailSwap = _shouldFail;
+    }
+    
     function swap(
         bytes32 poolId,
         address recipient,
@@ -31,6 +36,7 @@ contract MockPoolManager {
         bytes calldata /* hookData */
     ) external returns (int128 amount0, int128 amount1) {
         require(poolExists[poolId], "Pool does not exist");
+        require(!shouldFailSwap, "Swap execution failed");
         
         // Mock swap logic
         if (zeroForOne) {

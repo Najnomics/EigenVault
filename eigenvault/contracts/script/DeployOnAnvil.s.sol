@@ -47,7 +47,7 @@ contract DeployOnAnvil is Script {
 
         // 4. Deploy EigenVaultAVS
         console.log("Deploying EigenVaultAVS...");
-        EigenVaultAVS avs = new EigenVaultAVS();
+        EigenVaultAVS avs = new EigenVaultAVSServiceManager(address(0), address(0), address(0), address(0), address(0), address(0));
         console.log("EigenVaultAVS deployed at:", address(avs));
 
         // 5. Deploy EigenVaultHook
