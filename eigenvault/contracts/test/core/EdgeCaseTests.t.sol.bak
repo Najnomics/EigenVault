@@ -67,7 +67,21 @@ contract EdgeCaseTestsTest is Test {
         });
     }
     
-    // Test 1: Zero amount operations - REMOVED (was failing)
+    // Test 1: Zero amount operations
+    function testZeroAmountEdgeCases() public {
+        address operator = address(0x1001);
+        vm.deal(operator, MIN_STAKE);
+        vm.prank(operator);
+        avs.registerOperator{value: MIN_STAKE}("zero_op");
+        
+        // Test zero reward distribution
+        vm.expectRevert();
+        avs.distributeReward(operator, 0);
+        
+        // Test zero slashing
+        vm.expectRevert();
+        avs.slashOperator(operator, 0, "zero slash");
+    }
     
     // Test 2: Maximum value boundaries
     function testMaximumValueBoundaries() public {
@@ -228,7 +242,18 @@ contract EdgeCaseTestsTest is Test {
         avs.slashOperator(operator, 1 ether, "Below minimum");
     }
     
-    // Test 11: Task data validation edge cases - REMOVED (was failing)
+    // Test 11: Task data validation edge cases
+    function testTaskDataValidationEdgeCases() public {
+        // Empty data should fail
+        vm.expectRevert();
+        avs.createTask(keccak256("empty_data_task"), "", block.timestamp + 2 hours);
+        
+        // Valid single character data
+        bytes32 taskId = keccak256("single_char_task");
+        avs.createTask(taskId, "a", block.timestamp + 2 hours);
+        
+        assertEq(avs.totalTasks(), 1);
+    }
     
     // Test 12: Order matching price edge cases
     function testOrderMatchingPriceEdgeCases() public {
@@ -404,7 +429,7 @@ contract EdgeCaseTestsTest is Test {
         
         // Distribute reward
         vm.deal(address(avs), 10 ether);
-        avs.distributeReward{value: 10 ether}(operator, 10 ether);
+        avs.distributeReward(operator, 10 ether);
         assertEq(avs.getTotalRewards(operator), 10 ether);
         
         // Slash after reward
@@ -479,7 +504,19 @@ contract EdgeCaseTestsTest is Test {
         avs.submitTaskResponse(taskIndex, "duplicate_response");
     }
     
-    // Test 21: Timestamp arithmetic edge cases - REMOVED (was failing)
+    // Test 21: Timestamp arithmetic edge cases
+    function testTimestampArithmeticEdgeCases() public {
+        // Very far future deadline
+        uint256 farFuture = type(uint256).max / 2;
+        
+        if (farFuture > block.timestamp) {
+            bytes32 taskId = keccak256("far_future_task");
+            avs.createTask(taskId, "far_future_data", farFuture);
+            
+            (,, uint256 deadline,) = avs.getTask(1);
+            assertEq(deadline, farFuture);
+        }
+    }
     
     // Test 22: Order matching amount edge cases
     function testOrderMatchingAmountEdgeCases() public {

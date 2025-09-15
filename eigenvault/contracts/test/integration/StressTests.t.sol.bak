@@ -133,7 +133,25 @@ contract StressTestsTest is Test {
         assertTrue(avs.isRegisteredOperator(richOperator));
     }
     
-    // function testZeroValueOperations() public - REMOVED (was failing)
+    function testZeroValueOperations() public {
+        address operator = address(0x67890);
+        vm.deal(operator, MIN_STAKE);
+        vm.prank(operator);
+        avs.registerOperator{value: MIN_STAKE}("zero_op");
+        
+        // Try to distribute zero rewards
+        vm.expectRevert();
+        avs.distributeReward(operator, 0);
+        
+        // Try to slash zero amount
+        vm.expectRevert();
+        avs.slashOperator(operator, 0, "zero slash");
+        
+        // Try to withdraw zero stake
+        vm.prank(operator);
+        vm.expectRevert();
+        avs.withdrawStake(0);
+    }
     
     function testDeadlineEdgeCases() public {
         // Test with deadline too soon (should fail)
@@ -169,7 +187,33 @@ contract StressTestsTest is Test {
         avs.submitTaskResponse(taskIndex3, "late_response");
     }
     
-    // function testMaliciousDataSubmission() public - REMOVED (was failing)
+    function testMaliciousDataSubmission() public {
+        address operator = address(0xBAD123);
+        vm.deal(operator, MIN_STAKE);
+        vm.prank(operator);
+        avs.registerOperator{value: MIN_STAKE}("malicious_op");
+        
+        bytes32 taskId = keccak256("malicious_task");
+        uint32 taskIndex = avs.createTask(taskId, "normal_data", block.timestamp + 2 hours);
+        
+        // Try to submit empty response
+        vm.prank(operator);
+        vm.expectRevert();
+        avs.submitTaskResponse(taskIndex, "");
+        
+        // Try to submit extremely large response
+        bytes memory largeResponse = new bytes(100000); // 100KB
+        for (uint256 i = 0; i < largeResponse.length; i++) {
+            largeResponse[i] = bytes1(uint8(i % 256));
+        }
+        
+        vm.prank(operator);
+        avs.submitTaskResponse(taskIndex, largeResponse);
+        
+        // Verify the large response was stored
+        bytes memory storedResponse = avs.getTaskResponse(taskIndex, operator);
+        assertEq(storedResponse.length, largeResponse.length);
+    }
     
     function testBoundaryTimestamps() public {
         address hook = address(avs);
@@ -257,9 +301,72 @@ contract StressTestsTest is Test {
         assertTrue(exists);
     }
     
-    // function testPauseStateConsistency() public - REMOVED (was failing)
+    function testPauseStateConsistency() public {
+        address operator = address(0xAABBCC);
+        vm.deal(operator, MIN_STAKE);
+        
+        // Register operator
+        vm.prank(operator);
+        avs.registerOperator{value: MIN_STAKE}("pause_op");
+        
+        // Create task
+        bytes32 taskId = keccak256("pause_task");
+        uint32 taskIndex = avs.createTask(taskId, "pause_data", block.timestamp + 2 hours);
+        
+        // Pause system
+        avs.emergencyPause();
+        
+        // All operations should be paused
+        address newOperator = address(0xDDEEFF);
+        vm.deal(newOperator, MIN_STAKE);
+        vm.prank(newOperator);
+        vm.expectRevert();
+        avs.registerOperator{value: MIN_STAKE}("new_op");
+        
+        vm.expectRevert();
+        avs.createTask(keccak256("new_task"), "new_data", block.timestamp + 2 hours);
+        
+        vm.prank(operator);
+        vm.expectRevert();
+        avs.submitTaskResponse(taskIndex, "paused_response");
+        
+        vm.prank(operator);
+        vm.expectRevert();
+        avs.deregisterOperator();
+        
+        // Unpause
+        avs.emergencyUnpause();
+        
+        // Operations should work again
+        vm.prank(operator);
+        avs.submitTaskResponse(taskIndex, "unpaused_response");
+        
+        (,,,bool completed) = avs.getTask(taskIndex);
+        assertTrue(completed);
+    }
     
-    // function testOwnershipTransferEdgeCases() public - REMOVED (was failing)
+    function testOwnershipTransferEdgeCases() public {
+        address newOwner = address(0x123456);
+        address operator = address(0x789ABC);
+        
+        // Transfer ownership
+        avs.transferOwnership(newOwner);
+        assertEq(avs.owner(), newOwner);
+        
+        // Old owner should not be able to perform owner actions
+        vm.expectRevert();
+        avs.emergencyPause();
+        
+        vm.expectRevert();
+        avs.distributeReward(operator, 1 ether);
+        
+        // New owner should be able to perform owner actions
+        vm.prank(newOwner);
+        avs.emergencyPause();
+        
+        vm.prank(newOwner);
+        avs.emergencyUnpause();
+    }
     
     function testRapidStateChanges() public {
         address operator = address(0xFEDCBA);
@@ -348,5 +455,47 @@ contract StressTestsTest is Test {
         assertEq(orderVault.totalOrdersExpired(), expiredCount);
     }
     
-    // function testSystemRecoveryAfterPause() public - REMOVED (was failing)
+    function testSystemRecoveryAfterPause() public {
+        address operator1 = address(0x111111);
+        address operator2 = address(0x222222);
+        vm.deal(operator1, MIN_STAKE);
+        vm.deal(operator2, MIN_STAKE);
+        
+        // Normal operations before pause
+        vm.prank(operator1);
+        avs.registerOperator{value: MIN_STAKE}("recover1");
+        
+        bytes32 taskId = keccak256("recovery_task");
+        uint32 taskIndex = avs.createTask(taskId, "recovery_data", block.timestamp + 4 hours);
+        
+        // Pause system
+        avs.emergencyPause();
+        
+        // Try operations during pause (should fail)
+        vm.prank(operator2);
+        vm.expectRevert();
+        avs.registerOperator{value: MIN_STAKE}("recover2");
+        
+        vm.prank(operator1);
+        vm.expectRevert();
+        avs.submitTaskResponse(taskIndex, "paused_response");
+        
+        // Unpause and verify full recovery
+        avs.emergencyUnpause();
+        
+        // All operations should work normally
+        vm.prank(operator2);
+        avs.registerOperator{value: MIN_STAKE}("recover2");
+        
+        vm.prank(operator1);
+        avs.submitTaskResponse(taskIndex, "recovery_response");
+        
+        bytes32 newTaskId = keccak256("post_recovery_task");
+        avs.createTask(newTaskId, "post_recovery_data", block.timestamp + 2 hours);
+        
+        assertEq(avs.totalOperators(), 2);
+        assertEq(avs.totalTasks(), 2);
+        (,,,bool completed) = avs.getTask(taskIndex);
+        assertTrue(completed);
+    }
 }

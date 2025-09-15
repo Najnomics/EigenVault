@@ -314,7 +314,7 @@ contract PerformanceTestsTest is Test {
             vm.deal(address(avs), rewardAmount);
             
             uint256 gasStart = gasleft();
-            avs.distributeReward{value: rewardAmount}(operator, rewardAmount);
+            avs.distributeReward(operator, rewardAmount);
             uint256 gasUsed = gasStart - gasleft();
             
             totalGasUsed += gasUsed;
@@ -571,7 +571,7 @@ contract PerformanceTestsTest is Test {
         for (uint256 i = 0; i < rewards && i < operators; i++) {
             address operator = address(uint160(0xE000 + i));
             vm.deal(address(avs), 1 ether);
-            avs.distributeReward{value: 1 ether}(operator, 1 ether);
+            avs.distributeReward(operator, 1 ether);
         }
         
         // Perform some slashing

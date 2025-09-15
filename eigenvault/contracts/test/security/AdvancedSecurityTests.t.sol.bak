@@ -298,7 +298,25 @@ contract AdvancedSecurityTests is Test {
         assertTrue(totalTasks <= spamCount); // But system should handle it
     }
     
-    // function testPrivilegeEscalation() public - REMOVED (was failing)
+    function testPrivilegeEscalation() public {
+        // Test protection against privilege escalation
+        vm.deal(ATTACKER, MIN_STAKE);
+        vm.prank(ATTACKER);
+        avs.registerOperator{value: MIN_STAKE}("privilege_attacker");
+        
+        // Try to call owner-only functions as operator
+        vm.prank(ATTACKER);
+        vm.expectRevert(); // Should fail - not owner
+        avs.emergencyPause();
+        
+        vm.prank(ATTACKER);
+        vm.expectRevert(); // Should fail - not owner  
+        avs.slashOperator(OPERATOR1, 1 ether, "unauthorized slash");
+        
+        vm.prank(ATTACKER);
+        vm.expectRevert(); // Should fail - not owner
+        avs.distributeReward(ATTACKER, 1 ether);
+    }
     
     function DISABLED_testDataCorruption() public {
         // Test protection against data corruption attacks
@@ -426,7 +444,30 @@ contract AdvancedSecurityTests is Test {
         assertTrue(avs.isRegisteredOperator(LEGITIMATE_USER));
     }
     
-    // function testSlashingResistance() public - REMOVED (was failing)
+    function testSlashingResistance() public {
+        // Test resistance to slashing manipulation
+        vm.deal(OPERATOR1, MIN_STAKE * 2);
+        vm.prank(OPERATOR1);
+        avs.registerOperator{value: MIN_STAKE * 2}("slash_target");
+        
+        uint256 initialStake = avs.getOperatorStake(OPERATOR1);
+        
+        // Only owner should be able to slash
+        vm.prank(ATTACKER);
+        vm.expectRevert();
+        avs.slashOperator(OPERATOR1, 1 ether, "unauthorized slash");
+        
+        // Stake should remain unchanged
+        uint256 stakeAfterAttack = avs.getOperatorStake(OPERATOR1);
+        assertEq(stakeAfterAttack, initialStake);
+        
+        // Owner can slash legitimately
+        vm.prank(OWNER);
+        avs.slashOperator(OPERATOR1, 1 ether, "legitimate slash");
+        
+        uint256 stakeAfterSlash = avs.getOperatorStake(OPERATOR1);
+        assertEq(stakeAfterSlash, initialStake - 1 ether);
+    }
     
     function testInvalidSignatureAttack() public {
         // Test protection against invalid signature attacks

@@ -138,7 +138,7 @@ contract ComprehensiveIntegrationTestsTest is Test {
         // Step 5: Distribute rewards
         for (uint256 i = 0; i < 3; i++) {
             vm.deal(address(avs), 1 ether);
-            avs.distributeReward{value: 1 ether}(operators[i], 1 ether);
+            avs.distributeReward(operators[i], 1 ether);
         }
         
         // Verify final state
@@ -301,7 +301,67 @@ contract ComprehensiveIntegrationTestsTest is Test {
         assertTrue(spread > 0);
     }
     
-    // function testFullSystemStressTest() public - REMOVED (was failing)
+    function testFullSystemStressTest() public {
+        uint256 operators = 5;
+        uint256 tasks = 10;
+        uint256 orders = 15;
+        
+        // Phase 1: Setup
+        address[] memory operatorAddresses = new address[](operators);
+        for (uint256 i = 0; i < operators; i++) {
+            operatorAddresses[i] = address(uint160(0x8000 + i));
+            vm.deal(operatorAddresses[i], MIN_STAKE + 10 ether);
+            vm.prank(operatorAddresses[i]);
+            avs.registerOperator{value: MIN_STAKE}(string(abi.encodePacked("stress_op", i)));
+        }
+        
+        // Phase 2: Create tasks
+        uint32[] memory taskIndices = new uint32[](tasks);
+        for (uint256 i = 0; i < tasks; i++) {
+            bytes32 taskId = keccak256(abi.encode("stress_task", i));
+            taskIndices[i] = avs.createTask(taskId, abi.encode("stress_data", i), block.timestamp + 2 hours);
+        }
+        
+        // Phase 3: Store orders
+        bytes32[] memory orderIds = new bytes32[](orders);
+        for (uint256 i = 0; i < orders; i++) {
+            orderIds[i] = keccak256(abi.encode("stress_order", i));
+            address trader = operatorAddresses[i % operators];
+            vm.prank(address(avs));
+            orderVault.storeOrder(orderIds[i], trader, abi.encode("stress_order_data", i), block.timestamp + 2 hours);
+        }
+        
+        // Phase 4: Submit responses
+        for (uint256 i = 0; i < tasks && i < operators; i++) {
+            vm.prank(operatorAddresses[i]);
+            avs.submitTaskResponse(taskIndices[i], abi.encode("stress_response", i));
+        }
+        
+        // Phase 5: Rewards and slashing
+        for (uint256 i = 0; i < operators; i++) {
+            if (i % 2 == 0) {
+                vm.deal(address(avs), 1 ether);
+                avs.distributeReward(operatorAddresses[i], 1 ether);
+            } else {
+                avs.slashOperator(operatorAddresses[i], 0.5 ether, "Stress test slash");
+            }
+        }
+        
+        // Verify system state
+        assertEq(avs.totalOperators(), operators);
+        assertEq(avs.totalTasks(), tasks);
+        assertEq(orderVault.totalOrders(), orders);
+        
+        for (uint256 i = 0; i < operators; i++) {
+            assertTrue(avs.isRegisteredOperator(operatorAddresses[i]));
+            if (i % 2 == 0) {
+                assertTrue(avs.getTotalRewards(operatorAddresses[i]) > 0);
+            } else {
+                (uint256 slashed,) = avs.getSlashingInfo(operatorAddresses[i]);
+                assertTrue(slashed > 0);
+            }
+        }
+    }
     
     function testCrossContractInteractions() public {
         // Test AVS and OrderVault interactions
@@ -330,7 +390,47 @@ contract ComprehensiveIntegrationTestsTest is Test {
         assertTrue(exists);
     }
     
-    // function testSystemRecoveryScenarios() public - REMOVED (was failing)
+    function testSystemRecoveryScenarios() public {
+        // Setup initial state
+        address operator = address(0xA001);
+        vm.deal(operator, MIN_STAKE);
+        vm.prank(operator);
+        avs.registerOperator{value: MIN_STAKE}("recovery_op");
+        
+        bytes32 taskId = keccak256("recovery_task");
+        uint32 taskIndex = avs.createTask(taskId, "recovery_data", block.timestamp + 4 hours);
+        
+        // Pause system
+        avs.emergencyPause();
+        assertTrue(avs.paused());
+        
+        // Verify operations are blocked during pause
+        vm.prank(operator);
+        vm.expectRevert();
+        avs.submitTaskResponse(taskIndex, "paused_response");
+        
+        address newOperator = address(0xA002);
+        vm.deal(newOperator, MIN_STAKE);
+        vm.prank(newOperator);
+        vm.expectRevert();
+        avs.registerOperator{value: MIN_STAKE}("paused_op");
+        
+        // Unpause system
+        avs.emergencyUnpause();
+        assertFalse(avs.paused());
+        
+        // Verify operations work after unpause
+        vm.prank(operator);
+        avs.submitTaskResponse(taskIndex, "recovery_response");
+        
+        vm.prank(newOperator);
+        avs.registerOperator{value: MIN_STAKE}("recovered_op");
+        
+        (,,,bool completed) = avs.getTask(taskIndex);
+        assertTrue(completed);
+        assertTrue(avs.isRegisteredOperator(newOperator));
+        assertEq(avs.totalOperators(), 2);
+    }
     
     function DISABLED_testComplexOrderLifecycle() public {
         address hook = address(avs);
@@ -398,7 +498,7 @@ contract ComprehensiveIntegrationTestsTest is Test {
         
         // Distribute reward
         vm.deal(address(avs), 5 ether);
-        avs.distributeReward{value: 5 ether}(operator, 5 ether);
+        avs.distributeReward(operator, 5 ether);
         assertEq(avs.getTotalRewards(operator), 5 ether);
         
         // Apply slashing
@@ -457,7 +557,7 @@ contract ComprehensiveIntegrationTestsTest is Test {
         // Batch rewards distribution
         for (uint256 i = 0; i < batchSize; i++) {
             vm.deal(address(avs), 0.1 ether);
-            avs.distributeReward{value: 0.1 ether}(operators[i], 0.1 ether);
+            avs.distributeReward(operators[i], 0.1 ether);
         }
         
         // Verify batch results
@@ -500,5 +600,41 @@ contract ComprehensiveIntegrationTestsTest is Test {
         assertTrue(orderExists);
     }
     
-    // function testErrorRecoveryMechanisms() public - REMOVED (was failing)
+    function testErrorRecoveryMechanisms() public {
+        address operator1 = address(0xF001);
+        address operator2 = address(0xF002);
+        
+        vm.deal(operator1, MIN_STAKE);
+        vm.deal(operator2, MIN_STAKE);
+        
+        // Register operators
+        vm.prank(operator1);
+        avs.registerOperator{value: MIN_STAKE}("error_op1");
+        
+        vm.prank(operator2);
+        avs.registerOperator{value: MIN_STAKE}("error_op2");
+        
+        // Create task
+        bytes32 taskId = keccak256("error_recovery_task");
+        uint32 taskIndex = avs.createTask(taskId, "error_data", block.timestamp + 2 hours);
+        
+        // First operator submits response
+        vm.prank(operator1);
+        avs.submitTaskResponse(taskIndex, "first_response");
+        
+        // Second operator tries to submit (should fail - task already completed)
+        vm.prank(operator2);
+        vm.expectRevert();
+        avs.submitTaskResponse(taskIndex, "second_response");
+        
+        // Verify system state is consistent
+        (,,,bool completed) = avs.getTask(taskIndex);
+        assertTrue(completed);
+        
+        bytes memory storedResponse = avs.getTaskResponse(taskIndex, operator1);
+        assertEq(keccak256(storedResponse), keccak256("first_response"));
+        
+        // Verify operator2 wasn't affected
+        assertTrue(avs.isRegisteredOperator(operator2));
+    }
 }

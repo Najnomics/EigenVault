@@ -455,7 +455,46 @@ contract MultiChainIntegrationTests is Test {
         emit ChainSyncCompleted(CHAIN_ID_L2, block.number);
     }
     
-    // function testCrossChainRewardDistribution() public - REMOVED (was failing)
+    function testCrossChainRewardDistribution() public {
+        _setupCrossChainOperators();
+        
+        // Create tasks on both chains
+        bytes32 mainnetTaskId = keccak256("mainnet_reward_task");
+        bytes32 l2TaskId = keccak256("l2_reward_task");
+        
+        vm.prank(OWNER);
+        uint32 mainnetTaskIndex = mainnetAVS.createTask(mainnetTaskId, "mainnet_work", block.timestamp + 2 hours);
+        vm.prank(OWNER);
+        uint32 l2TaskIndex = l2AVS.createTask(l2TaskId, "l2_work", block.timestamp + 2 hours);
+        
+        // Complete tasks
+        vm.prank(MAINNET_OPERATOR);
+        mainnetAVS.submitTaskResponse(mainnetTaskIndex, "mainnet_result");
+        
+        vm.prank(L2_OPERATOR);
+        l2AVS.submitTaskResponse(l2TaskIndex, "l2_result");
+        
+        // Distribute rewards on both chains
+        vm.deal(address(mainnetAVS), 10 ether);
+        vm.deal(address(l2AVS), 5 ether);
+        
+        vm.prank(OWNER);
+        mainnetAVS.distributeReward(MAINNET_OPERATOR, 2 ether);
+        
+        vm.prank(OWNER);
+        l2AVS.distributeReward(L2_OPERATOR, 1 ether);
+        
+        // Verify cross-chain reward tracking
+        uint256 mainnetRewards = mainnetAVS.getTotalRewards(MAINNET_OPERATOR);
+        uint256 l2Rewards = l2AVS.getTotalRewards(L2_OPERATOR);
+        
+        assertEq(mainnetRewards, 2 ether);
+        assertEq(l2Rewards, 1 ether);
+        
+        // Test cross-chain reward aggregation (would be done off-chain in practice)
+        uint256 totalCrossChainRewards = mainnetRewards + l2Rewards;
+        assertEq(totalCrossChainRewards, 3 ether);
+    }
     
     function testCrossChainEmergencyResponse() public {
         _setupCrossChainOperators();
