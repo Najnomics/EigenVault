@@ -5,11 +5,20 @@ import {Script} from "forge-std/Script.sol";
 import {console} from "forge-std/console.sol";
 
 // Import our actual contracts
-import "../src/avs/EigenVaultAVS.sol";
+import "../src/avs/EigenVaultAVSServiceManager.sol";
 import "../src/vault/OrderVault.sol";
 
 // Mock contracts for testing
 import "../test/core/MockERC20.sol";
+import "../test/mocks/EigenLayerMocks.sol";
+
+// Interface imports for type casting
+import {IAVSDirectory} from "@eigenlayer/interfaces/IAVSDirectory.sol";
+import {IRewardsCoordinator} from "@eigenlayer/interfaces/IRewardsCoordinator.sol";
+import {ISlashingRegistryCoordinator} from "@eigenlayer-middleware/interfaces/ISlashingRegistryCoordinator.sol";
+import {IStakeRegistry} from "@eigenlayer-middleware/interfaces/IStakeRegistry.sol";
+import {IPermissionController} from "@eigenlayer/interfaces/IPermissionController.sol";
+import {IAllocationManager} from "@eigenlayer/interfaces/IAllocationManager.sol";
 
 /// @title DeploySimplifiedOnAnvil
 /// @notice Simplified deployment script for EigenVault core components on Anvil
@@ -26,31 +35,54 @@ contract DeploySimplifiedOnAnvil is Script {
 
         vm.startBroadcast(deployerPrivateKey);
 
-        // 1. Deploy Mock ERC20 tokens for testing
+        // 1. Deploy Mock EigenLayer contracts
+        console.log("Deploying Mock EigenLayer contracts...");
+        SimpleMockAVSDirectory mockAVSDirectory = new SimpleMockAVSDirectory();
+        SimpleMockRewardsCoordinator mockRewardsCoordinator = new SimpleMockRewardsCoordinator();
+        SimpleMockSlashingRegistryCoordinator mockSlashingRegistry = new SimpleMockSlashingRegistryCoordinator();
+        SimpleMockStakeRegistry mockStakeRegistry = new SimpleMockStakeRegistry();
+        SimpleMockPermissionController mockPermissionController = new SimpleMockPermissionController();
+        SimpleMockAllocationManager mockAllocationManager = new SimpleMockAllocationManager();
+        
+        console.log("SimpleMockAVSDirectory deployed at:", address(mockAVSDirectory));
+        console.log("SimpleMockRewardsCoordinator deployed at:", address(mockRewardsCoordinator));
+        console.log("SimpleMockSlashingRegistryCoordinator deployed at:", address(mockSlashingRegistry));
+        console.log("SimpleMockStakeRegistry deployed at:", address(mockStakeRegistry));
+        console.log("SimpleMockPermissionController deployed at:", address(mockPermissionController));
+        console.log("SimpleMockAllocationManager deployed at:", address(mockAllocationManager));
+
+        // 2. Deploy Mock ERC20 tokens for testing
         console.log("Deploying Mock Tokens...");
         MockERC20 token0 = new MockERC20("Test Token A", "TSTA", 18);
         MockERC20 token1 = new MockERC20("Test Token B", "TSTB", 18);
         console.log("Token0 (TSTA) deployed at:", address(token0));
         console.log("Token1 (TSTB) deployed at:", address(token1));
 
-        // 2. Deploy OrderVault
+        // 3. Deploy OrderVault
         console.log("Deploying OrderVault...");
         OrderVault orderVault = new OrderVault();
         console.log("OrderVault deployed at:", address(orderVault));
 
-        // 3. Deploy EigenVaultAVS
-        console.log("Deploying EigenVaultAVS...");
-        EigenVaultAVS avs = new EigenVaultAVSServiceManager(address(0), address(0), address(0), address(0), address(0), address(0));
-        console.log("EigenVaultAVS deployed at:", address(avs));
+        // 4. Deploy EigenVaultAVSServiceManager
+        console.log("Deploying EigenVaultAVSServiceManager...");
+        EigenVaultAVSServiceManager avs = new EigenVaultAVSServiceManager(
+            IAVSDirectory(address(mockAVSDirectory)),
+            IRewardsCoordinator(address(mockRewardsCoordinator)),
+            ISlashingRegistryCoordinator(address(mockSlashingRegistry)),
+            IStakeRegistry(address(mockStakeRegistry)),
+            IPermissionController(address(mockPermissionController)),
+            IAllocationManager(address(mockAllocationManager))
+        );
+        console.log("EigenVaultAVSServiceManager deployed at:", address(avs));
 
-        // 4. Configure contracts
+        // 5. Configure contracts
         console.log("Configuring contracts...");
         
         // For testing, we'll authorize the deployer as a "hook" to test order storage
         orderVault.authorizeHook(deployer, true);
         console.log("Deployer authorized as hook in OrderVault for testing");
 
-        // 5. Mint some test tokens to deployer and additional accounts
+        // 6. Mint some test tokens to deployer and additional accounts
         uint256 initialSupply = 1000000 ether;
         token0.mint(deployer, initialSupply);
         token1.mint(deployer, initialSupply);
@@ -68,14 +100,14 @@ contract DeploySimplifiedOnAnvil is Script {
 
         vm.stopBroadcast();
 
-        // 6. Deployment summary
+        // 7. Deployment summary
         console.log("\n=== DEPLOYMENT SUMMARY ===");
         console.log("Token0 (TSTA):", address(token0));
         console.log("Token1 (TSTB):", address(token1));
         console.log("OrderVault:", address(orderVault));
-        console.log("EigenVaultAVS:", address(avs));
+        console.log("EigenVaultAVSServiceManager:", address(avs));
         
-        // 7. Record deployment addresses (manually copy from logs if needed)
+        // 8. Record deployment addresses (manually copy from logs if needed)
         console.log("=== SAVE THESE ADDRESSES ===");
         console.log("TOKEN0=", address(token0));
         console.log("TOKEN1=", address(token1));
@@ -83,13 +115,13 @@ contract DeploySimplifiedOnAnvil is Script {
         console.log("EIGENVAULT_AVS=", address(avs));
         console.log("DEPLOYER=", deployer);
         
-        // 8. Test basic functionality
+        // 9. Test basic functionality
         console.log("\n=== TESTING BASIC FUNCTIONALITY ===");
         testBasicFunctionality(avs, orderVault, token0, token1, deployer);
     }
 
     function testBasicFunctionality(
-        EigenVaultAVS avs,
+        EigenVaultAVSServiceManager avs,
         OrderVault orderVault,
         MockERC20 token0,
         MockERC20 token1,

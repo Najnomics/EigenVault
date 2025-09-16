@@ -3,9 +3,18 @@ pragma solidity ^0.8.26;
 
 import {Script} from "forge-std/Script.sol";
 import {console} from "forge-std/console.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+
+// EigenLayer interface imports
+import {IAVSDirectory} from "@eigenlayer/interfaces/IAVSDirectory.sol";
+import {IRewardsCoordinator} from "@eigenlayer/interfaces/IRewardsCoordinator.sol";
+import {ISlashingRegistryCoordinator} from "@eigenlayer-middleware/interfaces/ISlashingRegistryCoordinator.sol";
+import {IStakeRegistry} from "@eigenlayer-middleware/interfaces/IStakeRegistry.sol";
+import {IPermissionController} from "@eigenlayer/interfaces/IPermissionController.sol";
+import {IAllocationManager} from "@eigenlayer/interfaces/IAllocationManager.sol";
 
 // Import our actual contracts
-import "../src/avs/EigenVaultAVS.sol";
+import "../src/avs/EigenVaultAVSServiceManager.sol";
 import "../src/hooks/EigenVaultHook.sol";
 import "../src/vault/OrderVault.sol";
 
@@ -45,10 +54,17 @@ contract DeployOnAnvil is Script {
         OrderVault orderVault = new OrderVault();
         console.log("OrderVault deployed at:", address(orderVault));
 
-        // 4. Deploy EigenVaultAVS
-        console.log("Deploying EigenVaultAVS...");
-        EigenVaultAVS avs = new EigenVaultAVSServiceManager(address(0), address(0), address(0), address(0), address(0), address(0));
-        console.log("EigenVaultAVS deployed at:", address(avs));
+        // 4. Deploy EigenVaultAVSServiceManager
+        console.log("Deploying EigenVaultAVSServiceManager...");
+        EigenVaultAVSServiceManager avs = new EigenVaultAVSServiceManager(
+            IAVSDirectory(address(0)),
+            IRewardsCoordinator(address(0)),
+            ISlashingRegistryCoordinator(address(0)),
+            IStakeRegistry(address(0)),
+            IPermissionController(address(0)),
+            IAllocationManager(address(0))
+        );
+        console.log("EigenVaultAVSServiceManager deployed at:", address(avs));
 
         // 5. Deploy EigenVaultHook
         console.log("Deploying EigenVaultHook...");
@@ -112,7 +128,7 @@ contract DeployOnAnvil is Script {
     }
 
     function testBasicFunctionality(
-        EigenVaultAVS avs,
+        EigenVaultAVSServiceManager avs,
         OrderVault orderVault,
         EigenVaultHook hook,
         MockERC20 token0,

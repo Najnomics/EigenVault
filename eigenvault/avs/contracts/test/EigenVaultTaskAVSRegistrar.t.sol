@@ -5,7 +5,7 @@ import {Test, console} from "forge-std/Test.sol";
 import {EigenVaultTaskAVSRegistrar} from "@project/l1-contracts/EigenVaultTaskAVSRegistrar.sol";
 
 // Mock contracts for testing
-contract MockAllocationManager {
+contract SimpleMockAllocationManager {
     function getOperatorMagnitude(address, address) external pure returns (uint64) {
         return 1000; // Mock magnitude
     }
@@ -17,7 +17,7 @@ contract MockKeyRegistrar {
     }
 }
 
-contract MockPermissionController {
+contract SimpleMockPermissionController {
     function hasPermission(address, address, bytes4) external pure returns (bool) {
         return true;
     }
@@ -25,9 +25,9 @@ contract MockPermissionController {
 
 contract EigenVaultTaskAVSRegistrarTest is Test {
     EigenVaultTaskAVSRegistrar public registrar;
-    MockAllocationManager public mockAllocationManager;
+    SimpleMockAllocationManager public mockAllocationManager;
     MockKeyRegistrar public mockKeyRegistrar;
-    MockPermissionController public mockPermissionController;
+    SimpleMockPermissionController public mockPermissionController;
     
     address public owner = address(0x1);
     address public avs = address(0x2);
@@ -37,9 +37,9 @@ contract EigenVaultTaskAVSRegistrarTest is Test {
 
     function setUp() public {
         // Deploy mock contracts
-        mockAllocationManager = new MockAllocationManager();
+        mockAllocationManager = new SimpleMockAllocationManager();
         mockKeyRegistrar = new MockKeyRegistrar();
-        mockPermissionController = new MockPermissionController();
+        mockPermissionController = new SimpleMockPermissionController();
 
         // Deploy the registrar
         registrar = new EigenVaultTaskAVSRegistrar(

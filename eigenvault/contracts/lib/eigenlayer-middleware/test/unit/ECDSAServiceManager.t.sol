@@ -37,7 +37,7 @@ contract MockDelegationManager {
     }
 }
 
-contract MockAVSDirectory {
+contract SimpleMockAVSDirectory {
     function registerOperatorToAVS(
         address,
         ISignatureUtilsMixinTypes.SignatureWithSaltAndExpiry memory
@@ -52,11 +52,11 @@ contract MockAVSDirectory {
     ) external pure {}
 }
 
-contract MockAllocationManager {
+contract SimpleMockAllocationManager {
     function setAVSRegistrar(address avs, address registrar) external {}
 }
 
-contract MockRewardsCoordinator {
+contract SimpleMockRewardsCoordinator {
     function createAVSRewardsSubmission(
         address avs,
         IRewardsCoordinator.RewardsSubmission[] calldata
@@ -74,10 +74,10 @@ contract MockRewardsCoordinator {
 
 contract ECDSAServiceManagerSetup is Test {
     MockDelegationManager public mockDelegationManager;
-    MockAVSDirectory public mockAVSDirectory;
-    MockAllocationManager public mockAllocationManager;
+    SimpleMockAVSDirectory public mockAVSDirectory;
+    SimpleMockAllocationManager public mockAllocationManager;
     ECDSAStakeRegistryMock public mockStakeRegistry;
-    MockRewardsCoordinator public mockRewardsCoordinator;
+    SimpleMockRewardsCoordinator public mockRewardsCoordinator;
     ECDSAServiceManagerMock public serviceManager;
     address internal operator1;
     address internal operator2;
@@ -86,11 +86,11 @@ contract ECDSAServiceManagerSetup is Test {
 
     function setUp() public {
         mockDelegationManager = new MockDelegationManager();
-        mockAVSDirectory = new MockAVSDirectory();
-        mockAllocationManager = new MockAllocationManager();
+        mockAVSDirectory = new SimpleMockAVSDirectory();
+        mockAllocationManager = new SimpleMockAllocationManager();
         mockStakeRegistry =
             new ECDSAStakeRegistryMock(IDelegationManager(address(mockDelegationManager)));
-        mockRewardsCoordinator = new MockRewardsCoordinator();
+        mockRewardsCoordinator = new SimpleMockRewardsCoordinator();
 
         serviceManager = new ECDSAServiceManagerMock(
             address(mockAVSDirectory),
@@ -389,7 +389,7 @@ contract ECDSAServiceManagerIntegrationTests is ECDSAServiceManagerSetup {
         vm.expectCall(
             address(mockAllocationManager),
             abi.encodeCall(
-                MockAllocationManager.setAVSRegistrar, (address(serviceManager), newRegistrar)
+                SimpleMockAllocationManager.setAVSRegistrar, (address(serviceManager), newRegistrar)
             )
         );
 
@@ -403,7 +403,7 @@ contract ECDSAServiceManagerIntegrationTests is ECDSAServiceManagerSetup {
         // Expect call to AVS directory
         vm.expectCall(
             address(mockAVSDirectory),
-            abi.encodeCall(MockAVSDirectory.updateAVSMetadataURI, (newURI))
+            abi.encodeCall(SimpleMockAVSDirectory.updateAVSMetadataURI, (newURI))
         );
 
         vm.prank(serviceManager.owner());
@@ -416,7 +416,7 @@ contract ECDSAServiceManagerIntegrationTests is ECDSAServiceManagerSetup {
         // Expect call to AVS directory
         vm.expectCall(
             address(mockAVSDirectory),
-            abi.encodeCall(MockAVSDirectory.registerOperatorToAVS, (operator1, signature))
+            abi.encodeCall(SimpleMockAVSDirectory.registerOperatorToAVS, (operator1, signature))
         );
 
         vm.prank(address(mockStakeRegistry));
@@ -427,7 +427,7 @@ contract ECDSAServiceManagerIntegrationTests is ECDSAServiceManagerSetup {
         // Expect call to AVS directory
         vm.expectCall(
             address(mockAVSDirectory),
-            abi.encodeCall(MockAVSDirectory.deregisterOperatorFromAVS, (operator1))
+            abi.encodeCall(SimpleMockAVSDirectory.deregisterOperatorFromAVS, (operator1))
         );
 
         vm.prank(address(mockStakeRegistry));
@@ -440,7 +440,7 @@ contract ECDSAServiceManagerIntegrationTests is ECDSAServiceManagerSetup {
         // Expect call to rewards coordinator
         vm.expectCall(
             address(mockRewardsCoordinator),
-            abi.encodeCall(MockRewardsCoordinator.setClaimerFor, (claimer))
+            abi.encodeCall(SimpleMockRewardsCoordinator.setClaimerFor, (claimer))
         );
 
         vm.prank(serviceManager.owner());

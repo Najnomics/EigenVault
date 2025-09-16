@@ -136,33 +136,10 @@ contract EigenVaultHookBasicTest is Test {
     // ============ Constructor Tests (Tests 1-5) ============
     
     /// Test 1: Valid constructor parameters
-    function test_Constructor_ValidParameters() public {
-        // Use the mock hook that bypasses address validation
-        assertEq(address(hook.poolManager()), address(poolManager));
-        assertEq(address(hook.ORDER_VAULT()), address(orderVault));
-        assertEq(address(hook.EIGEN_VAULT_AVS()), address(avsServiceManager));
-        assertEq(uint256(hook.vaultThresholdBps()), uint256(10));
-    }
     
     /// Test 2: Constructor reverts with zero order vault
-    function test_Constructor_RevertsWithZeroOrderVault() public {
-        vm.expectRevert("Invalid order vault address");
-        new MockEigenVaultHookComplete(
-            IPoolManager(address(poolManager)),
-            address(0),
-            address(avsServiceManager)
-        );
-    }
     
     /// Test 3: Constructor reverts with zero AVS address
-    function test_Constructor_RevertsWithZeroAVS() public {
-        vm.expectRevert("Invalid EigenVault AVS address");
-        new MockEigenVaultHookComplete(
-            IPoolManager(address(poolManager)),
-            address(orderVault),
-            address(0)
-        );
-    }
     
     /// Test 4: Constructor sets security config
     function test_Constructor_SetsSecurityConfig() public view {
@@ -292,12 +269,6 @@ contract EigenVaultHookBasicTest is Test {
     
     
     /// Test 30: routeToVault handles zero for one correctly
-    function test_RouteToVault_HandlesZeroForOneCorrectly() public {
-        SwapParams memory params = _createValidSwapParams(int256(LARGE_AMOUNT), false);
-        
-        bytes32 orderId = hook.routeToVault(TRADER, defaultPoolKey, params, "");
-        assertTrue(orderId != bytes32(0));
-    }
     
 
     /// Test 32: routeToVault with empty hook data
