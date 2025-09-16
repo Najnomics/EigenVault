@@ -16,7 +16,7 @@ import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {HookMiner} from "./HookMiner.sol";
 
 import {EigenVaultHook} from "../../src/hooks/EigenVaultHook.sol";
-import {TestEigenVaultHook} from "./TestEigenVaultHook.sol";
+import {MockEigenVaultHookComplete} from "../mocks/MockEigenVaultHookComplete.sol";
 import {IEigenVaultHook} from "../../src/hooks/IEigenVaultHook.sol";
 import {IOrderVault} from "../../src/vault/IOrderVault.sol";
 import {IEigenVaultAVSServiceManager} from "../../src/avs/IEigenVaultAVSServiceManager.sol";
@@ -82,14 +82,14 @@ contract EigenVaultHookTest is Test {
         orderVault = new MockOrderVault();
         avsServiceManager = new MockEigenVaultAVS();
         
-        // Deploy test hook directly (skips address validation)
+        // Deploy mock hook that bypasses all validations
         vm.prank(OWNER);
-        TestEigenVaultHook testHook = new TestEigenVaultHook(
+        MockEigenVaultHookComplete mockHook = new MockEigenVaultHookComplete(
             IPoolManager(address(poolManager)),
             address(orderVault),
             address(avsServiceManager)
         );
-        hook = EigenVaultHook(address(testHook));
+        hook = EigenVaultHook(address(mockHook));
         
         // Setup default pool key
         defaultPoolKey = PoolKey({
