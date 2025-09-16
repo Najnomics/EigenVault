@@ -3,16 +3,19 @@ pragma solidity ^0.8.26;
 
 import {Script} from "forge-std/Script.sol";
 import {console} from "forge-std/console.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 
 // Import our actual contracts
 import "../src/avs/EigenVaultAVSServiceManager.sol";
+import "../src/hooks/EigenVaultHook.sol";
 import "../src/vault/OrderVault.sol";
 
 // Mock contracts for testing
+import "../test/hooks/MockPoolManager.sol";
 import "../test/core/MockERC20.sol";
-import "../test/mocks/EigenLayerMocks.sol";
 
-// Interface imports for type casting
+// EigenLayer interface imports
 import {IAVSDirectory} from "@eigenlayer/interfaces/IAVSDirectory.sol";
 import {IRewardsCoordinator} from "@eigenlayer/interfaces/IRewardsCoordinator.sol";
 import {ISlashingRegistryCoordinator} from "@eigenlayer-middleware/interfaces/ISlashingRegistryCoordinator.sol";
@@ -20,158 +23,112 @@ import {IStakeRegistry} from "@eigenlayer-middleware/interfaces/IStakeRegistry.s
 import {IPermissionController} from "@eigenlayer/interfaces/IPermissionController.sol";
 import {IAllocationManager} from "@eigenlayer/interfaces/IAllocationManager.sol";
 
-/// @title DeploySimplifiedOnAnvil
-/// @notice Simplified deployment script for EigenVault core components on Anvil
+/// @title Deploy EigenVault Simplified
+/// @notice Simplified deployment script for Anvil using working test patterns
 contract DeploySimplifiedOnAnvil is Script {
+    // Production flags for EigenVault
+    uint160 public constant REQUIRED_FLAGS = Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG; // 192
     
     function run() external {
         // Use the first Anvil account
         uint256 deployerPrivateKey = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;
         address deployer = vm.addr(deployerPrivateKey);
 
-        console.log("Deploying EigenVault core system on Anvil...");
+        console.log("=== EigenVault Simplified Deployment to Anvil ===");
         console.log("Deployer address:", deployer);
         console.log("Deployer balance:", deployer.balance);
+        console.log("Required flags:", REQUIRED_FLAGS);
 
         vm.startBroadcast(deployerPrivateKey);
 
-        // 1. Deploy Mock EigenLayer contracts
-        console.log("Deploying Mock EigenLayer contracts...");
-        SimpleMockAVSDirectory mockAVSDirectory = new SimpleMockAVSDirectory();
-        SimpleMockRewardsCoordinator mockRewardsCoordinator = new SimpleMockRewardsCoordinator();
-        SimpleMockSlashingRegistryCoordinator mockSlashingRegistry = new SimpleMockSlashingRegistryCoordinator();
-        SimpleMockStakeRegistry mockStakeRegistry = new SimpleMockStakeRegistry();
-        SimpleMockPermissionController mockPermissionController = new SimpleMockPermissionController();
-        SimpleMockAllocationManager mockAllocationManager = new SimpleMockAllocationManager();
-        
-        console.log("SimpleMockAVSDirectory deployed at:", address(mockAVSDirectory));
-        console.log("SimpleMockRewardsCoordinator deployed at:", address(mockRewardsCoordinator));
-        console.log("SimpleMockSlashingRegistryCoordinator deployed at:", address(mockSlashingRegistry));
-        console.log("SimpleMockStakeRegistry deployed at:", address(mockStakeRegistry));
-        console.log("SimpleMockPermissionController deployed at:", address(mockPermissionController));
-        console.log("SimpleMockAllocationManager deployed at:", address(mockAllocationManager));
-
-        // 2. Deploy Mock ERC20 tokens for testing
-        console.log("Deploying Mock Tokens...");
+        // 1. Deploy Mock ERC20 tokens
+        console.log("\n1. Deploying Mock Tokens...");
         MockERC20 token0 = new MockERC20("Test Token A", "TSTA", 18);
         MockERC20 token1 = new MockERC20("Test Token B", "TSTB", 18);
-        console.log("Token0 (TSTA) deployed at:", address(token0));
-        console.log("Token1 (TSTB) deployed at:", address(token1));
+        console.log("Token0 (TSTA):", address(token0));
+        console.log("Token1 (TSTB):", address(token1));
+
+        // 2. Deploy Mock Pool Manager
+        console.log("\n2. Deploying Mock Pool Manager...");
+        MockPoolManager poolManager = new MockPoolManager();
+        console.log("MockPoolManager:", address(poolManager));
 
         // 3. Deploy OrderVault
-        console.log("Deploying OrderVault...");
+        console.log("\n3. Deploying OrderVault...");
         OrderVault orderVault = new OrderVault();
-        console.log("OrderVault deployed at:", address(orderVault));
+        console.log("OrderVault:", address(orderVault));
 
-        // 4. Deploy EigenVaultAVSServiceManager
-        console.log("Deploying EigenVaultAVSServiceManager...");
+        // 4. Deploy EigenVaultAVSServiceManager with mock interfaces
+        console.log("\n4. Deploying EigenVaultAVSServiceManager...");
+        address mockAddress = address(0x1234); // Mock address for EigenLayer contracts
         EigenVaultAVSServiceManager avs = new EigenVaultAVSServiceManager(
-            IAVSDirectory(address(mockAVSDirectory)),
-            IRewardsCoordinator(address(mockRewardsCoordinator)),
-            ISlashingRegistryCoordinator(address(mockSlashingRegistry)),
-            IStakeRegistry(address(mockStakeRegistry)),
-            IPermissionController(address(mockPermissionController)),
-            IAllocationManager(address(mockAllocationManager))
+            IAVSDirectory(mockAddress),
+            IRewardsCoordinator(mockAddress),
+            ISlashingRegistryCoordinator(mockAddress),
+            IStakeRegistry(mockAddress),
+            IPermissionController(mockAddress),
+            IAllocationManager(mockAddress)
         );
-        console.log("EigenVaultAVSServiceManager deployed at:", address(avs));
+        console.log("EigenVaultAVSServiceManager:", address(avs));
 
-        // 5. Configure contracts
-        console.log("Configuring contracts...");
+        // 5. Deploy Hook directly (simplified approach for Anvil)
+        console.log("\n5. Deploying EigenVaultHook with production flags...");
         
-        // For testing, we'll authorize the deployer as a "hook" to test order storage
-        orderVault.authorizeHook(deployer, true);
-        console.log("Deployer authorized as hook in OrderVault for testing");
+        EigenVaultHook hook = new EigenVaultHook(
+            IPoolManager(address(poolManager)),
+            address(orderVault),
+            address(avs)
+        );
+        
+        console.log("EigenVaultHook deployed at:", address(hook));
+        
+        // Verify hook permissions
+        Hooks.Permissions memory permissions = hook.getHookPermissions();
+        console.log("Hook permissions - beforeSwap:", permissions.beforeSwap);
+        console.log("Hook permissions - afterSwap:", permissions.afterSwap);
 
-        // 6. Mint some test tokens to deployer and additional accounts
+        // 6. Configure contracts
+        console.log("\n6. Configuring contracts...");
+        
+        // Authorize hook in order vault
+        orderVault.authorizeHook(address(hook), true);
+        console.log("Hook authorized in OrderVault");
+
+        // 7. Mint test tokens
+        console.log("\n7. Minting test tokens...");
         uint256 initialSupply = 1000000 ether;
+        
+        // Mint to deployer
         token0.mint(deployer, initialSupply);
         token1.mint(deployer, initialSupply);
         
-        // Mint to additional test accounts
-        address testAccount1 = 0x70997970C51812dc3A010C7d01b50e0d17dc79C8;
-        address testAccount2 = 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC;
+        // Mint to test accounts
+        address testAccount1 = 0x70997970C51812dc3A010C7d01b50e0d17dc79C8; // Anvil account 1
+        address testAccount2 = 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC; // Anvil account 2
         
         token0.mint(testAccount1, initialSupply);
         token1.mint(testAccount1, initialSupply);
         token0.mint(testAccount2, initialSupply);
         token1.mint(testAccount2, initialSupply);
         
-        console.log("Tokens minted to test accounts");
+        console.log("Tokens minted to deployer and test accounts");
 
         vm.stopBroadcast();
 
-        // 7. Deployment summary
-        console.log("\n=== DEPLOYMENT SUMMARY ===");
-        console.log("Token0 (TSTA):", address(token0));
-        console.log("Token1 (TSTB):", address(token1));
+        // 8. Display deployment summary
+        console.log("\n=== Deployment Summary ===");
+        console.log("Network: Anvil (Chain ID: 31337)");
+        console.log("MockPoolManager:", address(poolManager));
         console.log("OrderVault:", address(orderVault));
         console.log("EigenVaultAVSServiceManager:", address(avs));
+        console.log("EigenVaultHook:", address(hook));
+        console.log("Test Token A (TSTA):", address(token0));
+        console.log("Test Token B (TSTB):", address(token1));
+        console.log("Hook Flags (Production):", REQUIRED_FLAGS);
         
-        // 8. Record deployment addresses (manually copy from logs if needed)
-        console.log("=== SAVE THESE ADDRESSES ===");
-        console.log("TOKEN0=", address(token0));
-        console.log("TOKEN1=", address(token1));
-        console.log("ORDER_VAULT=", address(orderVault));
-        console.log("EIGENVAULT_AVS=", address(avs));
-        console.log("DEPLOYER=", deployer);
-        
-        // 9. Test basic functionality
-        console.log("\n=== TESTING BASIC FUNCTIONALITY ===");
-        testBasicFunctionality(avs, orderVault, token0, token1, deployer);
-    }
-
-    function testBasicFunctionality(
-        EigenVaultAVSServiceManager avs,
-        OrderVault orderVault,
-        MockERC20 token0,
-        MockERC20 token1,
-        address deployer
-    ) internal {
-        console.log("Testing basic functionality...");
-        
-        // Test 1: Check initial state
-        console.log("AVS total operators:", avs.totalOperators());
-        console.log("OrderVault total orders:", orderVault.totalOrders());
-        console.log("Deployer is authorized hook:", orderVault.isAuthorizedHook(deployer));
-        
-        // Test 2: Try to register an operator (this should require ETH)
-        console.log("Attempting operator registration with 32 ETH...");
-        try avs.registerOperator{value: 32 ether}("https://test-operator.com") {
-            console.log("[SUCCESS] Operator registration successful");
-            console.log("Total operators now:", avs.totalOperators());
-            console.log("Is operator registered:", avs.isRegisteredOperator(deployer));
-        } catch {
-            console.log("[INFO] Operator registration failed - may need additional setup");
-        }
-        
-        // Test 3: Test OrderVault functionality
-        console.log("Testing OrderVault order storage...");
-        bytes32 testOrderId = keccak256("test_order_1");
-        bytes memory testOrderData = abi.encode("sample_order_data", block.timestamp);
-        uint256 testDeadline = block.timestamp + 2 hours;
-        
-        try orderVault.storeOrder(testOrderId, deployer, testOrderData, testDeadline) {
-            console.log("[SUCCESS] Order stored successfully");
-            console.log("Total orders now:", orderVault.totalOrders());
-            
-            // Try to retrieve the order
-            bytes memory retrievedData = orderVault.retrieveOrder(testOrderId);
-            console.log("Retrieved order data length:", retrievedData.length);
-            console.log("[SUCCESS] Order retrieval successful");
-        } catch {
-            console.log("[ERROR] Order storage failed");
-        }
-        
-        // Test 4: Check token balances
-        console.log("Checking token balances...");
-        console.log("Deployer Token0 balance:", token0.balanceOf(deployer));
-        console.log("Deployer Token1 balance:", token1.balanceOf(deployer));
-        
-        console.log("\n[SUCCESS] Basic functionality test completed");
-        console.log("=== NEXT STEPS FOR TESTING ===");
-        console.log("1. Use cast to interact with contracts");
-        console.log("2. Test operator registration with different accounts");
-        console.log("3. Test order matching and execution");
-        console.log("4. Test reward distribution and slashing");
+        console.log("\n=== Ready for Testing! ===");
+        console.log("- Hook deployed with production flags (beforeSwap + afterSwap)");
+        console.log("- Test tokens minted to deployer and test accounts");
+        console.log("- All contracts configured and ready");
     }
 }

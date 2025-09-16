@@ -191,7 +191,7 @@ contract EigenVaultHook is BaseHook, ReentrancyGuard, Ownable, IEigenVaultHook {
         });
     }
 
-    /// @notice Get the hook permissions
+    /// @notice Get the hook permissions - Production EigenVault configuration
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
         return Hooks.Permissions({
             beforeInitialize: false,
@@ -200,8 +200,8 @@ contract EigenVaultHook is BaseHook, ReentrancyGuard, Ownable, IEigenVaultHook {
             afterAddLiquidity: false,
             beforeRemoveLiquidity: false,
             afterRemoveLiquidity: false,
-            beforeSwap: true,
-            afterSwap: false,
+            beforeSwap: true,        // Required: Order routing and threshold detection
+            afterSwap: true,         // Required: Execution confirmation and result handling
             beforeDonate: false,
             afterDonate: false,
             beforeSwapReturnDelta: false,
