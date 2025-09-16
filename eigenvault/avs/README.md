@@ -1,382 +1,229 @@
-# EigenVault AVS (Actively Validated Services)
+# EigenVault AVS
 
-A production-ready EigenLayer AVS implementation for EigenVault, providing privacy-preserving order matching with zero-knowledge proofs and cryptoeconomic security. This system has undergone extensive testing with 343+ test functions and is ready for institutional deployment.
+A Hourglass-based Autonomous Verifiable Service (AVS) that provides distributed compute infrastructure for EigenVault's privacy-preserving order matching and MEV redistribution system.
 
-## 🏗️ Architecture Overview
+## Overview
 
-EigenVault AVS consists of three main components:
+This AVS serves as a **distributed execution layer** for EigenVault operations using the Hourglass framework to provide:
 
-1. **Smart Contracts** - On-chain AVS service manager and integration
-2. **Go AVS Infrastructure** - Operator and aggregator software
-3. **Configuration & Keys** - Operator management and system configuration
+- **Distributed task execution** for order matching operations
+- **EigenLayer operator management** and staking coordination  
+- **Privacy-preserving computation** for encrypted order processing
+- **Decentralized consensus** on order execution and rewards distribution
 
-### Smart Contracts
+## Architecture
 
-- **`EigenVaultAVSServiceManager.sol`** - Core AVS service manager with operator registration and task management
-- **`IAVSDirectory.sol`** - EigenLayer AVS Directory interface for ecosystem integration
-- **ZKProofLib.sol** - Zero-knowledge proof verification for private order matching
-- **SecurityLib.sol** - Comprehensive security controls and slashing protection
-- **Integration with EigenVaultHook and OrderVault** - Seamless Uniswap v4 integration
+This AVS follows the Hourglass DevKit template structure:
 
-### Go AVS Infrastructure
+```
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│  EigenLayer     │───▶│  L1: Service    │───▶│  L2: Task Hook  │
+│  (Operators)    │    │  Manager        │    │  (Validator)    │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+                                                       │
+                                                       ▼
+                                               ┌─────────────────┐
+                                               │  EigenVault:    │
+                                               │  Order Matching │
+                                               │  & MEV System   │
+                                               └─────────────────┘
+```
 
-- **Operator** - High-performance order matching with ZK proof generation
-- **Aggregator** - Consensus formation and batch verification optimization
-- **AVS Registry** - Advanced blockchain interaction with slashing protection
-- **Monitoring** - Production-grade metrics and health monitoring
+### Directory Structure
 
-## 🚀 Quick Start
+```
+├── cmd/                          # Performer application (task orchestration)
+│   ├── main.go                  # ✅ EigenVault Performer implementation
+│   └── main_test.go             # ✅ Comprehensive tests for all task types
+├── contracts/                    # EigenVault AVS contracts
+│   ├── src/
+│   │   ├── interfaces/          # AVS-specific interfaces
+│   │   │   └── IAVSDirectory.sol # ✅ EigenLayer AVS interface
+│   │   ├── l1-contracts/        # EigenLayer integration
+│   │   │   └── EigenVaultServiceManager.sol # ✅ L1 service manager
+│   │   └── l2-contracts/        # Task lifecycle management
+│   │       └── EigenVaultTaskHook.sol # ✅ L2 task hook
+│   ├── script/                  # Deployment scripts
+│   │   ├── DeployEigenVaultL1Contracts.s.sol # ✅ Deploy L1 contracts
+│   │   └── DeployEigenVaultL2Contracts.s.sol # ✅ Deploy L2 contracts
+│   └── test/                    # Contract tests
+│       ├── EigenVaultServiceManager.t.sol # ✅ L1 contract tests
+│       └── EigenVaultTaskHook.t.sol       # ✅ L2 contract tests
+├── .devkit/                     # DevKit integration
+├── .hourglass/                  # Hourglass framework configuration
+├── go.mod                       # ✅ Go dependencies (Hourglass/Ponos)
+├── go.sum                       # ✅ Dependency checksums
+└── README.md                    # This file
+```
+
+### Component Responsibilities
+
+**✅ AVS Contracts:**
+- **L1 ServiceManager** (`EigenVaultServiceManager.sol`):
+  - EigenLayer operator registration and staking coordination
+  - Extends `TaskAVSRegistrarBase` for EigenLayer integration
+  - Manages operator stake requirements and slashing conditions
+  
+- **L2 TaskHook** (`EigenVaultTaskHook.sol`):
+  - Implements `IAVSTaskHook` for Hourglass task lifecycle management
+  - Validates EigenVault task parameters and calculates fees
+  - Coordinates with main EigenVault Hook system
+
+**✅ Go Performer (`cmd/main.go`):**
+- **Task Orchestration**: Coordinates distributed execution of EigenVault tasks
+- **Payload Parsing**: Handles 4 task types (order matching, privacy execution, rewards update, stake validation)
+- **Result Aggregation**: Aggregates responses from operators for consensus
+- **Hourglass Integration**: Implements `ValidateTask` and `HandleTask` interfaces
+
+## Quick Start
 
 ### Prerequisites
 
-- Go 1.21+
-- Foundry (for smart contract development)
-- Ethereum node access (Sepolia testnet recommended)
+- [Docker (latest)](https://docs.docker.com/engine/install/)
+- [Foundry (latest)](https://book.getfoundry.sh/getting-started/installation)
+- [Go (v1.23.6)](https://go.dev/doc/install)
+- [DevKit CLI](https://github.com/Layr-Labs/devkit-cli)
 
-### 1. Build the Project
+### Build
 
 ```bash
-# Build Go components
+# Build the performer binary
 make build
 
-# Build smart contracts
-cd contracts && forge build
+# Build contracts
+make build-contracts
+
+# Build everything
+make
 ```
 
-### 2. Generate Keys
+### Development with DevKit
 
 ```bash
-# Generate operator and aggregator keys
-make keys
-```
+# Build AVS and contracts
+devkit avs build --image eigenvault
 
-### 3. Configure the System
+# Start local development network
+devkit avs devnet start
 
-```bash
-# Copy and edit configuration files
-cp config/operator.yaml.example config/operator.yaml
-cp config/aggregator.yaml.example config/aggregator.yaml
+# Run the performer
+devkit avs run
 
-# Edit with your settings
-nano config/operator.yaml
-nano config/aggregator.yaml
-```
-
-### 4. Deploy Smart Contracts
-
-```bash
-# Deploy to testnet
-cd contracts && forge script DeployEigenVaultAVS --rpc-url $SEPOLIA_RPC_URL --broadcast
-```
-
-### 5. Run the AVS
-
-```bash
-# Terminal 1: Start aggregator
-make deploy-aggregator
-
-# Terminal 2: Start operator
-make deploy-operator
-```
-
-## 📁 Project Structure
-
-```
-eigenvault/avs/
-├── contracts/                 # Smart contracts
-│   ├── src/
-│   │   ├── EigenVaultAVSServiceManager.sol
-│   │   └── interfaces/
-│   │       └── IAVSDirectory.sol
-│   └── foundry.toml
-├── cmd/                      # Command-line interfaces
-│   ├── operator/
-│   │   └── main.go
-│   └── aggregator/
-│       └── main.go
-├── operator/                 # Operator implementation
-│   └── operator.go
-├── aggregator/               # Aggregator implementation
-│   └── aggregator.go
-├── pkg/                      # Shared packages
-│   └── avsregistry/
-│       └── avsregistry.go
-├── config/                   # Configuration files
-│   ├── operator.yaml
-│   └── aggregator.yaml
-├── keys/                     # Key storage
-│   ├── operator.ecdsa.key.json
-│   ├── operator.bls.key.json
-│   └── aggregator.ecdsa.key.json
-├── go.mod                    # Go dependencies
-├── Makefile                  # Build automation
-└── README.md                 # This file
-```
-
-## ⚙️ Configuration
-
-### Operator Configuration
-
-```yaml
-operator:
-  ecdsa_private_key_store_path: "./keys/operator.ecdsa.key.json"
-  bls_private_key_store_path: "./keys/operator.bls.key.json"
-  eth_rpc_url: "https://sepolia.infura.io/v3/YOUR_INFURA_KEY"
-  eth_ws_url: "wss://sepolia.infura.io/ws/v3/YOUR_INFURA_KEY"
-  registry_coordinator_address: "0x..."
-  operator_state_retriever_address: "0x..."
-  aggregator_server_ip_port_address: "localhost:8090"
-  register_operator_on_startup: true
-  eigen_metrics_ip_port_address: "localhost:9090"
-  enable_metrics: true
-  node_api_ip_port_address: "localhost:9091"
-  enable_node_api: true
-
-order_matching:
-  min_order_size: "1000000000000000000"  # 1 ETH
-  max_matching_delay: "30s"
-  price_oracle: "chainlink"
-  privacy_threshold: "50"  # 0.5% in basis points
-  zk_proof_required: false  # FHE will replace this
-
-logging:
-  level: "info"
-  format: "json"
-```
-
-### Aggregator Configuration
-
-```yaml
-aggregator:
-  server_ip_port_address: "localhost:8090"
-  eth_rpc_url: "https://sepolia.infura.io/v3/YOUR_INFURA_KEY"
-  registry_coordinator_address: "0x..."
-  operator_state_retriever_address: "0x..."
-  aggregator_private_key_path: "./keys/aggregator.ecdsa.key.json"
-  eigen_metrics_ip_port_address: "localhost:9092"
-  enable_metrics: true
-
-order_matching:
-  response_timeout: "60s"
-  quorum_threshold: 67  # 67% threshold
-  min_operators: 3
-  max_order_batch_size: 100
-  privacy_enabled: true
-
-logging:
-  level: "info"
-  format: "json"
-```
-
-## 🔑 Key Management
-
-### Operator Keys
-
-- **ECDSA Key**: Used for Ethereum transactions and operator identification
-- **BLS Key**: Used for cryptographic signatures and consensus
-
-### Aggregator Keys
-
-- **ECDSA Key**: Used for submitting aggregated results to blockchain
-
-### Key Generation
-
-```bash
-# Generate new keys
-make keys
-
-# Or manually generate
-openssl genpkey -algorithm EC -out operator.ecdsa.key.pem
-# Convert to required format...
-```
-
-## 🏃‍♂️ Usage
-
-### Starting the Operator
-
-```bash
-# Using Makefile
-make deploy-operator
-
-# Or directly
-go run cmd/operator/main.go -config ./config/operator.yaml
-```
-
-### Starting the Aggregator
-
-```bash
-# Using Makefile
-make deploy-aggregator
-
-# Or directly
-go run cmd/aggregator/main.go -config ./config/aggregator.yaml
-```
-
-### Monitoring
-
-```bash
-# Check operator status
-curl http://localhost:9091/health
-
-# Check aggregator status
-curl http://localhost:8090/health
-
-# View metrics
-curl http://localhost:9090/metrics
-```
-
-## 🔒 Security Model
-
-### Consensus Mechanism
-
-- **Quorum-based**: Requires 67% of registered operators to respond
-- **BLS Signatures**: Cryptographic verification of operator responses
-- **Challenge Window**: 7-day period for disputing incorrect responses
-
-### Slashing Conditions
-
-- **Malicious Behavior**: Operators can be slashed for submitting incorrect responses
-- **Stake Requirements**: Minimum 32 ETH stake required for operator registration
-- **Reputation System**: Track record affects operator selection and rewards
-
-### Privacy Features
-
-- **Order Encryption**: Orders are encrypted before submission
-- **Threshold Privacy**: Privacy thresholds prevent information leakage
-- **MEV Protection**: Eliminates front-running and sandwich attacks
-
-## 🧪 Development
-
-### Building
-
-```bash
-# Build all components
-make build
-
-# Build specific component
-make build-operator
-make build-aggregator
+# Simulate tasks
+devkit avs call --task-type order_matching
 ```
 
 ### Testing
 
 ```bash
-# Run Go tests
+# Run all tests
 make test
 
-# Run smart contract tests
-cd contracts && forge test
+# Run Go tests only
+make test-go
+
+# Run Forge tests only
+make test-forge
 ```
 
-### Code Quality
+## Task Types
+
+The EigenVault Performer coordinates distributed execution of four main task types:
+
+### 1. Order Matching Tasks
+- **Coordinate** order matching across multiple operators
+- **Apply** optimal matching algorithms with privacy preservation
+- **Generate** execution plans for matched orders
+
+### 2. Privacy Execution Tasks  
+- **Process** encrypted order parameters using secure computation
+- **Execute** orders with privacy guarantees
+- **Generate** zero-knowledge proofs for order execution
+
+### 3. Rewards Update Tasks
+- **Calculate** operator performance metrics
+- **Update** stake weights and rewards distribution
+- **Process** MEV redistribution to users
+
+### 4. Stake Validation Tasks
+- **Validate** operator stake amounts and delegations
+- **Check** slashing conditions and requirements
+- **Coordinate** stake updates with EigenLayer
+
+## Configuration
+
+Configuration is managed through the Hourglass framework:
+
+- **`.hourglass/config/`** - Framework configuration
+- **`.hourglass/context/`** - Environment-specific settings
+- **`.devkit/`** - Development tooling configuration
+
+## Smart Contracts
+
+### AVS Contracts
+
+#### L1 Contracts (Ethereum Mainnet)
+- **EigenVaultServiceManager.sol** - EigenLayer integration
+  - ✅ Extends `TaskAVSRegistrarBase` for DevKit compliance
+  - ✅ Handles operator registration with minimum stake requirements
+  - ✅ Manages slashing conditions for poor performance
+  - ✅ Coordinates with L2 hook system
+
+#### L2 Contracts (Layer 2 Networks)
+- **EigenVaultTaskHook.sol** - Task system coordinator
+  - ✅ Implements `IAVSTaskHook` for Hourglass integration
+  - ✅ Validates 4 EigenVault task types with proper fee structure
+  - ✅ Calculates task fees based on computational complexity
+  - ✅ Interfaces with main EigenVault Hook system
+
+## Deployment
+
+### AVS Deployment
+Deployment is handled through DevKit scripts:
 
 ```bash
-# Format code
-make fmt
+# 1. Deploy L1 AVS contracts (EigenLayer integration)
+forge script contracts/script/DeployEigenVaultL1Contracts.s.sol:DeployEigenVaultL1Contracts
 
-# Lint code
-make lint
-
-# Run race detection
-make test-race
+# 2. Deploy L2 AVS contracts
+forge script contracts/script/DeployEigenVaultL2Contracts.s.sol:DeployEigenVaultL2Contracts
 ```
 
-## 🚢 Deployment
+### Deployment Order
+1. **AVS L1**: Deploy `EigenVaultServiceManager` (EigenLayer integration)  
+2. **AVS L2**: Deploy `EigenVaultTaskHook` (task coordination)
+3. **Configure**: Update context files with deployed addresses
 
-### Testnet Deployment
+## API
 
-```bash
-# Deploy to Sepolia
-make deploy-testnet
+The performer exposes a gRPC server on port 8080 implementing the Hourglass Performer interface:
 
-# Deploy to Holesky
-make deploy-holesky
+- `ValidateTask(TaskRequest) -> error` - Validates EigenVault task parameters
+- `HandleTask(TaskRequest) -> TaskResponse` - Coordinates task execution
+
+### Task Payload Structure
+
+Tasks are JSON payloads with the following structure:
+```json
+{
+  "type": "order_matching|privacy_execution|rewards_update|stake_validation", 
+  "parameters": {
+    "poolId": "0x...",
+    "orders": [...],
+    "privacyLevel": "high",
+    // ... task-specific parameters
+  }
+}
 ```
 
-### Mainnet Deployment
-
-```bash
-# Deploy to mainnet
-make deploy-mainnet
-```
-
-### Docker Deployment
-
-```bash
-# Build Docker images
-make docker-build
-
-# Run with Docker Compose
-make docker-run
-
-# Stop Docker services
-make docker-stop
-```
-
-## 📊 Monitoring & Metrics
-
-### Prometheus Metrics
-
-- **Operator Metrics**: Response times, task processing rates
-- **Aggregator Metrics**: Consensus formation, quorum achievement
-- **System Metrics**: Memory usage, network activity
-
-### Health Checks
-
-- **Operator Health**: Key status, blockchain connectivity
-- **Aggregator Health**: Server status, operator connectivity
-- **Contract Health**: AVS registration, stake verification
-
-## 🔧 Troubleshooting
-
-### Common Issues
-
-1. **Operator Registration Failed**
-   - Check stake requirements (32 ETH minimum)
-   - Verify signature validity
-   - Ensure proper EigenLayer integration
-
-2. **Quorum Not Reached**
-   - Check operator count (minimum 3 required)
-   - Verify operator responses
-   - Check network connectivity
-
-3. **Task Processing Errors**
-   - Verify order format and encryption
-   - Check privacy threshold settings
-   - Ensure proper task validation
-
-### Debug Mode
-
-```bash
-# Enable debug logging
-export LOG_LEVEL=debug
-
-# Run with verbose output
-go run cmd/operator/main.go -config ./config/operator.yaml -debug
-```
-
-## 🤝 Contributing
+## Contributing
 
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
-4. Add tests
+4. Run tests: `make test`
 5. Submit a pull request
 
-## 📄 License
+## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
-
-## 🙏 Acknowledgments
-
-- **EigenLayer Team** - For the AVS framework and documentation
-- **EigenLVR Project** - For the reference implementation pattern
-- **Uniswap Team** - For the v4 hooks architecture
-
-## 📞 Support
-
-For questions and support:
-- Open an issue on GitHub
-- Join our Discord community
-- Check the documentation wiki 
