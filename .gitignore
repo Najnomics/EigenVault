@@ -31,9 +31,21 @@ dist/
 dist
 
 # Environment files (comprehensive coverage)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*anvil-deployments.env
+*deployments.env
 
+# Private keys and sensitive data
 *token.json*
 *credentials.json*
+*.key
+*.pem
+*private-key*
+*seed-phrase*
 
 # Logs and debug files
 npm-debug.log*
@@ -84,4 +96,69 @@ android-sdk/
 .claude/
 
 context/
+
+# Foundry specific
+out/
+cache/
+broadcast/
+lib/
+!lib/forge-std/
+!lib/openzeppelin-contracts/
+
+# Solidity
+*.sol.bak
+*.sol.backup
+*.sol.orig
+
+# Test artifacts
+test_results/
+coverage/
+lcov.info
+gas-report.txt
+
+# Deployment artifacts
+deployments/
+*.deployments.json
+*.deployments.env
+
+# Logs
+logs/
+*.log
+*.log.*
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# OS specific
+Thumbs.db
+.DS_Store
+*.swp
+*.swo
+*~
+
+# IDE specific
+.vscode/settings.json
+.idea/workspace.xml
+.idea/tasks.xml
+
+# Backup files
+*.backup
+*.bak
+*.old
+
+# Development artifacts
+dev.log
+test.log
+deploy.log
+
+# Docker
+.dockerignore
+
+# Monitoring data
+monitoring/data/
+prometheus/data/
+grafana/data/
 
